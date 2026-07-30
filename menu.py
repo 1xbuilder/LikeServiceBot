@@ -117,8 +117,9 @@ async def _render_draft(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     if draft is None:
         return
     members = db.chat_members(chat_id)
-    text = ui.draft_text(draft)
-    markup = ui.draft_keyboard(draft, members)
+    files = len(db.draft_files(chat_id, user_id))
+    text = ui.draft_text(draft, files)
+    markup = ui.draft_keyboard(draft, members, files)
 
     if new or not draft["message_id"]:
         msg = await context.bot.send_message(
@@ -212,6 +213,10 @@ async def on_draft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 "кто уже писал в чат — попроси остальных отправить любое сообщение.",
                 show_alert=True)
 
+    elif action == "nofiles":
+        db.clear_draft_files(chat_id, user.id)
+        await query.answer("Вложения убраны")
+
     elif action == "txt":
         db.update_draft(chat_id, user.id, awaiting="text")
         await query.answer("Напиши текст задачи сообщением")
@@ -248,21 +253,27 @@ async def _save_draft(context: ContextTypes.DEFAULT_TYPE, query,
         client_date=draft["client_date"],
         needs_comment=bool(draft["needs_comment"]),
     )
+    files = db.move_draft_files(chat_id, user.id, task_id)
     db.clear_draft(chat_id, user.id)
     task = db.get_task(task_id)
 
     await query.answer("Задача создана ✅")
+    card_id = query.message.message_id
     try:
         await context.bot.edit_message_text(
-            chat_id=chat_id, message_id=query.message.message_id,
-            text=ui.task_card(task), parse_mode=ParseMode.HTML,
+            chat_id=chat_id, message_id=card_id,
+            text=ui.task_card(task, files), parse_mode=ParseMode.HTML,
             reply_markup=ui.task_keyboard(task))
-        db.add_task_message(task_id, chat_id, query.message.message_id)
+        db.add_task_message(task_id, chat_id, card_id)
     except TelegramError:
         msg = await context.bot.send_message(
-            chat_id=chat_id, text=ui.task_card(task), parse_mode=ParseMode.HTML,
-            reply_markup=ui.task_keyboard(task))
-        db.add_task_message(task_id, msg.chat_id, msg.message_id)
+            chat_id=chat_id, text=ui.task_card(task, files),
+            parse_mode=ParseMode.HTML, reply_markup=ui.task_keyboard(task))
+        card_id = msg.message_id
+        db.add_task_message(task_id, msg.chat_id, card_id)
+
+    # вложения идут отдельными сообщениями: карточку нужно уметь редактировать
+    await handlers.send_attachments(context, chat_id, task_id, card_id)
 
     unreachable = await handlers._notify_privately(context, task)
     if unreachable:
@@ -443,6 +454,11 @@ async def on_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     if action == "task":
         await query.answer()
 
+    elif action == "files":
+        await query.answer("Отправляю…")
+        await handlers.send_attachments(context, query.message.chat_id, task_id)
+        return
+
     elif action == "editc":
         await handlers.ask_for_comment(context, query, task, query.from_user, mode="edit")
         return
@@ -457,10 +473,11 @@ async def on_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await handlers.refresh_dashboard(context, task["chat_id"])
             task = db.get_task(task_id)
 
+    files = db.count_task_files(task_id)
     try:
         await query.edit_message_text(
-            ui.task_detail(task), parse_mode=ParseMode.HTML,
-            reply_markup=ui.task_detail_keyboard(task, days, only_mine))
+            ui.task_detail(task, files), parse_mode=ParseMode.HTML,
+            reply_markup=ui.task_detail_keyboard(task, days, only_mine, files))
     except TelegramError as exc:
         if "not modified" not in str(exc).lower():
             log.warning("Карточка задачи: %s", exc)

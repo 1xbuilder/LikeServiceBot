@@ -112,9 +112,12 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(menu.on_settings_callback, pattern=r"^s:"))
     app.add_handler(CallbackQueryHandler(menu.on_history_callback, pattern=r"^h:"))
     app.add_handler(CallbackQueryHandler(
-        menu.on_task_callback, pattern=r"^(task|editc|reopen):"))
+        menu.on_task_callback, pattern=r"^(task|editc|reopen|files):"))
     app.add_handler(CallbackQueryHandler(handlers.on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
+    app.add_handler(MessageHandler(
+        filters.PHOTO | filters.Document.ALL | filters.VIDEO
+        | filters.VOICE | filters.AUDIO, handlers.on_media))
 
     app.add_error_handler(on_error)
 

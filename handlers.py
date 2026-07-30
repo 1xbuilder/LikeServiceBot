@@ -6,7 +6,7 @@ import sqlite3
 from html import escape
 
 from telegram import (ForceReply, InlineKeyboardButton, InlineKeyboardMarkup,
-                      MessageEntity, Update)
+                      InputMediaPhoto, MessageEntity, Update)
 from telegram.constants import ParseMode
 from telegram.error import BadRequest, Forbidden, TelegramError
 from telegram.ext import ContextTypes
@@ -17,6 +17,57 @@ import ui
 from parsing import ParseError, parse_task, parse_time
 
 log = logging.getLogger(__name__)
+
+
+def extract_file(msg):
+    """Достаёт вложение из сообщения: (file_id, тип, имя) либо None."""
+    if msg.photo:
+        return msg.photo[-1].file_id, "photo", None       # последний = лучшее качество
+    if msg.document:
+        return msg.document.file_id, "document", msg.document.file_name
+    if msg.video:
+        return msg.video.file_id, "video", None
+    if msg.voice:
+        return msg.voice.file_id, "voice", None
+    if msg.audio:
+        return msg.audio.file_id, "audio", msg.audio.file_name
+    return None
+
+
+async def send_attachments(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
+                           task_id: int, reply_to: int | None = None) -> None:
+    """Пересылает вложения задачи по сохранённым file_id."""
+    files = db.task_files(task_id)
+    if not files:
+        return
+
+    photos = [f for f in files if f["file_type"] == "photo"]
+    others = [f for f in files if f["file_type"] != "photo"]
+
+    # фото уходят альбомом, по 10 штук за раз — лимит Telegram
+    for i in range(0, len(photos), 10):
+        chunk = photos[i:i + 10]
+        try:
+            if len(chunk) == 1:
+                await context.bot.send_photo(chat_id, chunk[0]["file_id"],
+                                             reply_to_message_id=reply_to)
+            else:
+                await context.bot.send_media_group(
+                    chat_id, [InputMediaPhoto(f["file_id"]) for f in chunk],
+                    reply_to_message_id=reply_to)
+        except TelegramError as exc:
+            log.warning("Не отправил фото задачи %s: %s", task_id, exc)
+
+    senders = {"document": context.bot.send_document, "video": context.bot.send_video,
+               "voice": context.bot.send_voice, "audio": context.bot.send_audio}
+    for row in others:
+        send = senders.get(row["file_type"])
+        if send is None:
+            continue
+        try:
+            await send(chat_id, row["file_id"], reply_to_message_id=reply_to)
+        except TelegramError as exc:
+            log.warning("Не отправил файл задачи %s: %s", task_id, exc)
 
 
 def full_name(user) -> str:
@@ -81,10 +132,11 @@ async def _update_task_cards(context: ContextTypes.DEFAULT_TYPE, task_id: int) -
     task = db.get_task(task_id)
     if task is None:
         return
+    files = db.count_task_files(task_id)
     if task["status"] == "active":
-        text, markup = ui.task_card(task), ui.task_keyboard(task)
+        text, markup = ui.task_card(task, files), ui.task_keyboard(task)
     else:
-        text, markup = ui.closed_card(task), None
+        text, markup = ui.closed_card(task, files), None
     for row in db.task_messages(task_id):
         try:
             await context.bot.edit_message_text(
@@ -110,10 +162,12 @@ async def _notify_privately(context: ContextTypes.DEFAULT_TYPE,
     for user in recipients:
         try:
             msg = await context.bot.send_message(
-                chat_id=user["private_chat_id"], text=ui.task_card(task),
+                chat_id=user["private_chat_id"],
+                text=ui.task_card(task, db.count_task_files(task["id"])),
                 parse_mode=ParseMode.HTML, reply_markup=ui.task_keyboard(task),
             )
             db.add_task_message(task["id"], msg.chat_id, msg.message_id)
+            await send_attachments(context, msg.chat_id, task["id"], msg.message_id)
         except (Forbidden, TelegramError):
             unreachable.append(user["full_name"])
     return unreachable
@@ -612,8 +666,56 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await menu.fill_draft_from_text(update, context, draft)
 
 
+async def on_media(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Фото и файлы: цепляем к открытому конструктору или к комментарию."""
+    import menu
+
+    msg = update.effective_message
+    user = update.effective_user
+    found = extract_file(msg)
+    if not found:
+        return
+    file_id, file_type, file_name = found
+    caption = (msg.caption or "").strip()
+
+    # 1) открыт конструктор задачи
+    draft = db.get_draft(msg.chat_id, user.id)
+    if draft is not None and not db.is_stale(draft["updated_at"], config.DRAFT_TTL_MINUTES):
+        db.add_draft_file(msg.chat_id, user.id, file_id, file_type, file_name)
+        fields = {"updated_at": db.now()}
+        # подпись к фото становится текстом задачи, если он ещё не задан
+        if caption and not draft["description"]:
+            fields.update(description=caption, awaiting=None)
+        db.update_draft(msg.chat_id, user.id, **fields)
+        if msg.chat.type in ("group", "supergroup"):
+            try:
+                await msg.delete()
+            except TelegramError:
+                pass
+        await menu._render_draft(context, msg.chat_id, user.id)
+        return
+
+    # 2) ждём комментарий — принимаем файл вместе с подписью
+    pending = db.get_pending(msg.chat_id, user.id)
+    if pending is not None and not db.is_stale(pending["created_at"],
+                                               config.COMMENT_TTL_MINUTES):
+        db.add_task_file(pending["task_id"], file_id, file_type, file_name)
+        if caption:
+            await _accept_comment(update, context, pending, text=caption)
+        else:
+            await msg.reply_text(
+                "Файл прикрепил. Теперь напиши комментарий сообщением.")
+        return
+
+    # 3) просто фото в чате — не наше дело
+    if msg.chat.type == "private":
+        await msg.reply_text(
+            "Чтобы приложить файл к задаче, сначала открой «➕ Новая задача» "
+            "в рабочей группе.")
+
+
 async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                          pending) -> None:
+                          pending, text: str | None = None) -> None:
     msg = update.effective_message
     user = update.effective_user
 
@@ -626,7 +728,7 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await msg.reply_text("Задача уже закрыта.")
         return
 
-    comment = msg.text.strip()
+    comment = (text if text is not None else msg.text).strip()
 
     private = msg.chat.type == "private"
 
@@ -635,8 +737,10 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await _update_task_cards(context, task["id"])
         task = db.get_task(task["id"])
         await msg.reply_html(
-            "✏️ Комментарий обновлён.\n\n" + ui.task_detail(task),
-            reply_markup=ui.task_detail_keyboard(task))
+            "✏️ Комментарий обновлён.\n\n"
+            + ui.task_detail(task, db.count_task_files(task["id"])),
+            reply_markup=ui.task_detail_keyboard(
+                task, files_count=db.count_task_files(task["id"])))
         if private:
             await _restore_menu(context, msg.chat_id)
         return

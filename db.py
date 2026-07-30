@@ -99,6 +99,28 @@ CREATE TABLE IF NOT EXISTS drafts (
     PRIMARY KEY (chat_id, user_id)
 );
 
+-- вложения задачи: храним file_id, сам файл лежит на серверах Telegram
+CREATE TABLE IF NOT EXISTS task_files (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id   INTEGER NOT NULL,
+    file_id   TEXT    NOT NULL,
+    file_type TEXT    NOT NULL,   -- photo / document / video
+    file_name TEXT,
+    added_at  TEXT    NOT NULL
+);
+
+-- вложения, прикреплённые в конструкторе до создания задачи
+CREATE TABLE IF NOT EXISTS draft_files (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id   INTEGER NOT NULL,
+    user_id   INTEGER NOT NULL,
+    file_id   TEXT    NOT NULL,
+    file_type TEXT    NOT NULL,
+    file_name TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_task_files ON task_files(task_id);
+CREATE INDEX IF NOT EXISTS idx_draft_files ON draft_files(chat_id, user_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_chat_status ON tasks(chat_id, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee    ON tasks(assignee_id, status);
 """
@@ -258,6 +280,51 @@ def update_draft(chat_id: int, user_id: int, **fields: Any) -> None:
 
 def clear_draft(chat_id: int, user_id: int) -> None:
     _run("DELETE FROM drafts WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+    clear_draft_files(chat_id, user_id)
+
+
+# ------------------------------------------------------------- вложения
+
+def add_draft_file(chat_id: int, user_id: int, file_id: str,
+                   file_type: str, file_name: str | None = None) -> None:
+    _run("""INSERT INTO draft_files (chat_id, user_id, file_id, file_type, file_name)
+            VALUES (?,?,?,?,?)""",
+         (chat_id, user_id, file_id, file_type, file_name))
+
+
+def draft_files(chat_id: int, user_id: int) -> list[sqlite3.Row]:
+    return _all("""SELECT * FROM draft_files WHERE chat_id = ? AND user_id = ?
+                   ORDER BY id""", (chat_id, user_id))
+
+
+def clear_draft_files(chat_id: int, user_id: int) -> None:
+    _run("DELETE FROM draft_files WHERE chat_id = ? AND user_id = ?",
+         (chat_id, user_id))
+
+
+def add_task_file(task_id: int, file_id: str, file_type: str,
+                  file_name: str | None = None) -> None:
+    _run("""INSERT INTO task_files (task_id, file_id, file_type, file_name, added_at)
+            VALUES (?,?,?,?,?)""",
+         (task_id, file_id, file_type, file_name, now()))
+
+
+def task_files(task_id: int) -> list[sqlite3.Row]:
+    return _all("SELECT * FROM task_files WHERE task_id = ? ORDER BY id", (task_id,))
+
+
+def count_task_files(task_id: int) -> int:
+    row = _one("SELECT COUNT(*) AS n FROM task_files WHERE task_id = ?", (task_id,))
+    return int(row["n"]) if row else 0
+
+
+def move_draft_files(chat_id: int, user_id: int, task_id: int) -> int:
+    """Переносит вложения из конструктора в созданную задачу."""
+    files = draft_files(chat_id, user_id)
+    for row in files:
+        add_task_file(task_id, row["file_id"], row["file_type"], row["file_name"])
+    clear_draft_files(chat_id, user_id)
+    return len(files)
 
 
 # --------------------------------------------------------------------- задачи

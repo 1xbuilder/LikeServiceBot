@@ -62,7 +62,16 @@ def _limit(text: str, tail: str = "") -> str:
 
 # ------------------------------------------------------------------ карточка
 
-def task_card(task: Task) -> str:
+def files_line(count: int) -> str:
+    if not count:
+        return ""
+    word = "файл" if count % 10 == 1 and count % 100 != 11 else (
+        "файла" if count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14)
+        else "файлов")
+    return f"📎 Вложения: {count} {word}"
+
+
+def task_card(task: Task, files_count: int = 0) -> str:
     lines = [
         f"{emoji(task)} <b>Задача #{task['id']}</b>",
         escape(task["description"]),
@@ -74,12 +83,14 @@ def task_card(task: Task) -> str:
         lines.append(f"Клиент: <b>{escape(task['client_date'])}</b>")
     if task["needs_comment"]:
         lines.append("💬 При закрытии нужен комментарий")
+    if files_count:
+        lines.append(files_line(files_count))
     if task["author_name"]:
         lines.append(f"<i>Поставил: {escape(task['author_name'])}</i>")
     return "\n".join(lines)
 
 
-def closed_card(task: Task) -> str:
+def closed_card(task: Task, files_count: int = 0) -> str:
     mark = "✅ Выполнено" if task["status"] == "done" else "✖️ Отменена"
     lines = [
         f"{mark} — <b>задача #{task['id']}</b>",
@@ -91,6 +102,8 @@ def closed_card(task: Task) -> str:
         lines.append(f"Закрыл: {escape(task['completed_by'])}")
     if task["comment_text"]:
         lines.append(f"💬 {escape(task['comment_text'])}")
+    if files_count:
+        lines.append(files_line(files_count))
     return "\n".join(lines)
 
 
@@ -266,6 +279,9 @@ HELP_TEXT = """<b>Бот-задачник</b>
 
 ➕ <b>Новая задача</b> — конструктор: пишешь текст, тапами выбираешь исполнителя,
 приоритет, когда ждать клиента и нужен ли комментарий при закрытии.
+К задаче можно приложить фото или файл: пока открыт конструктор, просто
+пришли их сообщением. Подпись к фото станет текстом задачи, если он ещё не задан.
+
 📋 <b>Задачи</b> — все активные, с кнопкой ✅ у каждой.
 🙋 <b>Мои задачи</b> — только твои.
 🗂 <b>История</b> — закрытые и отменённые, с комментариями.
@@ -323,7 +339,7 @@ DATE_PRESETS = [("сегодня", "сегодня"), ("завтра", "завт
                 ("послезавтра", "послезавтра")]
 
 
-def draft_text(draft) -> str:
+def draft_text(draft, files: int = 0) -> str:
     if draft["is_all"]:
         names = db.member_names(draft["chat_id"])
         who = ("👥 Все — " + ", ".join(escape(n) for n in names)) if names else "👥 Все"
@@ -345,6 +361,10 @@ def draft_text(draft) -> str:
         f"5. Комментарий при закрытии: "
         f"{'нужен 💬' if draft['needs_comment'] else 'не нужен'}",
     ]
+    if files:
+        lines.append(f"6. {files_line(files)}")
+    else:
+        lines.append("6. Вложения: — <i>пришли фото или файл сообщением</i>")
     if draft["awaiting"] == "text":
         lines += ["", "✍️ <b>Напиши текст задачи сообщением</b>"]
     elif draft["awaiting"] == "date":
@@ -352,7 +372,7 @@ def draft_text(draft) -> str:
     return "\n".join(lines)
 
 
-def draft_keyboard(draft, members) -> InlineKeyboardMarkup:
+def draft_keyboard(draft, members, files: int = 0) -> InlineKeyboardMarkup:
     rows: list[list[InlineKeyboardButton]] = []
 
     # 1. текст — первым, как и в описании
@@ -400,6 +420,9 @@ def draft_keyboard(draft, members) -> InlineKeyboardMarkup:
         "💬 Комментарий нужен ✅" if draft["needs_comment"] else "💬 Комментарий не нужен",
         callback_data="d:nc")])
 
+    if files:
+        rows.append([InlineKeyboardButton(
+            f"🗑 Убрать вложения ({files})", callback_data="d:nofiles")])
     rows.append([
         InlineKeyboardButton("✅ Создать", callback_data="d:save"),
         InlineKeyboardButton("✖️ Отмена", callback_data="d:cancel"),
@@ -500,7 +523,7 @@ def history_keyboard(days: int = 7, only_mine: bool = True,
     return InlineKeyboardMarkup(rows)
 
 
-def task_detail(task: Task) -> str:
+def task_detail(task: Task, files_count: int = 0) -> str:
     """Подробная карточка для личного кабинета."""
     if task["status"] == "done":
         head = "✅ <b>Выполнена</b>"
@@ -524,6 +547,8 @@ def task_detail(task: Task) -> str:
     if task["completed_at"]:
         when = task["completed_at"][:16].replace("T", " ")
         lines.append(f"Закрыл: {escape(task['completed_by'] or '—')}, {when}")
+    if files_count:
+        lines.append(files_line(files_count))
     if task["comment_text"]:
         lines.append("")
         lines.append(f"💬 {escape(task['comment_text'])}")
@@ -533,10 +558,14 @@ def task_detail(task: Task) -> str:
     return "\n".join(lines)
 
 
-def task_detail_keyboard(task: Task, days: int = 7,
-                         only_mine: bool = True) -> InlineKeyboardMarkup:
+def task_detail_keyboard(task: Task, days: int = 7, only_mine: bool = True,
+                         files_count: int = 0) -> InlineKeyboardMarkup:
     scope = "my" if only_mine else "all"
     rows = []
+    if files_count:
+        rows.append([InlineKeyboardButton(
+            f"📎 Показать вложения ({files_count})",
+            callback_data=f"files:{task['id']}:{days}:{scope}")])
     if task["status"] == "active":
         rows.append([_done_button(task)])
     else:
