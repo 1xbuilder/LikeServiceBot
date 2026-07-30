@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS users (
     username        TEXT,
     full_name       TEXT,
     private_chat_id INTEGER,
-    last_seen       TEXT
+    last_seen       TEXT,
+    exclude_from_all INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS chat_settings (
@@ -116,6 +117,7 @@ MIGRATIONS = [
     ("chat_settings", "nag_until", "nag_until TEXT NOT NULL DEFAULT '22:00'"),
     ("drafts", "updated_at", "updated_at TEXT"),
     ("pending_comments", "mode", "mode TEXT NOT NULL DEFAULT 'close'"),
+    ("users", "exclude_from_all", "exclude_from_all INTEGER NOT NULL DEFAULT 0"),
 ]
 
 
@@ -315,6 +317,29 @@ def reopen_task(task_id: int) -> None:
     )
 
 
+def set_exclude_from_all(user_id: int, value: bool) -> None:
+    _run("UPDATE users SET exclude_from_all = ? WHERE user_id = ?",
+         (int(value), user_id))
+
+
+def is_excluded(user_id: int | None) -> bool:
+    """Не участвует в задачах «Всем» — только в персонально назначенных."""
+    if user_id is None:
+        return False
+    row = _one("SELECT exclude_from_all FROM users WHERE user_id = ?", (user_id,))
+    return bool(row and row["exclude_from_all"])
+
+
+def all_task_members(chat_id: int) -> list[sqlite3.Row]:
+    """Кого реально касается задача «Всем»."""
+    return [u for u in chat_members(chat_id, fallback=False)
+            if not u["exclude_from_all"]]
+
+
+def member_names(chat_id: int) -> list[str]:
+    return [u["full_name"] for u in all_task_members(chat_id)]
+
+
 def user_chats(user_id: int) -> list[int]:
     return [r["chat_id"] for r in
             _all("SELECT chat_id FROM chat_members WHERE user_id = ?", (user_id,))]
@@ -327,7 +352,8 @@ def history_for_user(user_id: int, days: int, only_mine: bool = True) -> list[sq
         return []
     since = (datetime.now(config.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
     marks = ",".join("?" * len(chats))
-    mine = " AND (assignee_id = ? OR is_all = 1)" if only_mine else ""
+    all_clause = "" if is_excluded(user_id) else " OR is_all = 1"
+    mine = f" AND (assignee_id = ?{all_clause})" if only_mine else ""
     params = [*chats, since] + ([user_id] if only_mine else [])
     return _all(
         f"""SELECT * FROM tasks
@@ -346,20 +372,31 @@ def active_tasks(chat_id: int, assignee_id: int | None = None) -> list[sqlite3.R
                         id""",
             (chat_id,),
         )
+    # исключённому человеку задачи «Всем» не показываем — только его личные
+    all_clause = "" if is_excluded(assignee_id) else " OR is_all = 1"
     return _all(
-        """SELECT * FROM tasks WHERE chat_id = ? AND status = 'active'
-             AND (assignee_id = ? OR is_all = 1)
-           ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END,
-                    id""",
+        f"""SELECT * FROM tasks WHERE chat_id = ? AND status = 'active'
+              AND (assignee_id = ?{all_clause})
+            ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END,
+                     id""",
         (chat_id, assignee_id),
     )
 
 
 def active_tasks_for_user_all_chats(user_id: int) -> list[sqlite3.Row]:
+    """Задачи человека по всем его чатам. Для личного кабинета."""
+    chats = user_chats(user_id)
+    if not chats:
+        return []
+    marks = ",".join("?" * len(chats))
+    all_clause = "" if is_excluded(user_id) else " OR is_all = 1"
     return _all(
-        """SELECT * FROM tasks WHERE status = 'active' AND (assignee_id = ? OR is_all = 1)
-           ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END, id""",
-        (user_id,),
+        f"""SELECT * FROM tasks
+            WHERE status = 'active' AND chat_id IN ({marks})
+              AND (assignee_id = ?{all_clause})
+            ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END,
+                     id""",
+        (*chats, user_id),
     )
 
 

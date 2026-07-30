@@ -5,6 +5,8 @@ import sqlite3
 from datetime import datetime
 from html import escape
 
+import db
+
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       ReplyKeyboardMarkup)
 
@@ -19,7 +21,25 @@ def emoji(task: Task) -> str:
 
 
 def assignee(task: Task) -> str:
-    return "Все" if task["is_all"] else task["assignee_name"]
+    """Короткая подпись для списков."""
+    if not task["is_all"]:
+        return task["assignee_name"]
+    names = db.member_names(task["chat_id"])
+    return f"Все ({len(names)})" if names else "Все"
+
+
+def assignee_detailed(task: Task) -> str:
+    """Подпись для карточки: у задачи «Всем» перечисляем состав.
+
+    Нужно, чтобы было видно, кого задача касается, — включая автора
+    и не включая тех, кто помечен «не включать в задачи Всем».
+    """
+    if not task["is_all"]:
+        return task["assignee_name"]
+    names = db.member_names(task["chat_id"])
+    if not names:
+        return "Все"
+    return f"Все ({len(names)}): " + ", ".join(names)
 
 
 def _cut(text: str, limit: int) -> str:
@@ -47,7 +67,7 @@ def task_card(task: Task) -> str:
         f"{emoji(task)} <b>Задача #{task['id']}</b>",
         escape(task["description"]),
         "",
-        f"Ответственный: <b>{escape(assignee(task))}</b>",
+        f"Ответственный: <b>{escape(assignee_detailed(task))}</b>",
         f"Приоритет: {escape(task['priority'])}",
     ]
     if task["client_date"]:
@@ -65,7 +85,7 @@ def closed_card(task: Task) -> str:
         f"{mark} — <b>задача #{task['id']}</b>",
         f"<s>{escape(task['description'])}</s>",
         "",
-        f"Ответственный: {escape(assignee(task))}",
+        f"Ответственный: {escape(assignee_detailed(task))}",
     ]
     if task["completed_by"]:
         lines.append(f"Закрыл: {escape(task['completed_by'])}")
@@ -305,7 +325,8 @@ DATE_PRESETS = [("сегодня", "сегодня"), ("завтра", "завт
 
 def draft_text(draft) -> str:
     if draft["is_all"]:
-        who = "👥 Все"
+        names = db.member_names(draft["chat_id"])
+        who = ("👥 Все — " + ", ".join(escape(n) for n in names)) if names else "👥 Все"
     elif draft["assignee_name"]:
         who = escape(draft["assignee_name"])
     else:
@@ -347,11 +368,12 @@ def draft_keyboard(draft, members) -> InlineKeyboardMarkup:
         people.append(InlineKeyboardButton(label, callback_data=f"d:as:{user['user_id']}"))
     for i in range(0, len(people), 2):
         rows.append(people[i:i + 2])
-    rows.append([
-        InlineKeyboardButton(
-            ("✅ " if draft["is_all"] else "") + "👥 Всем", callback_data="d:all"),
-        InlineKeyboardButton("🔄 Обновить список", callback_data="d:sync"),
-    ])
+    count = len(db.member_names(draft["chat_id"]))
+    rows.append([InlineKeyboardButton(
+        ("✅ " if draft["is_all"] else "") + f"👥 Всем ({count})",
+        callback_data="d:all")])
+    rows.append([InlineKeyboardButton("🔄 Обновить список участников",
+                                      callback_data="d:sync")])
 
     # 3. приоритет
     rows.append([
@@ -387,7 +409,17 @@ def draft_keyboard(draft, members) -> InlineKeyboardMarkup:
 
 # ========================================================= экран настроек
 
-def settings_text(settings) -> str:
+def settings_text(settings, chat_id: int | None = None) -> str:
+    extra = []
+    if chat_id is not None:
+        names = db.member_names(chat_id)
+        extra = [
+            "",
+            f"👥 Задачи «Всем» касаются {len(names)} чел.: "
+            f"{escape(', '.join(names)) if names else '—'}",
+            "<i>кнопками ниже можно исключить человека: 🚫 — не попадает "
+            "в задачи «Всем», только в личные</i>",
+        ]
     return "\n".join([
         "⚙️ <b>Напоминания</b>",
         "",
@@ -406,12 +438,13 @@ def settings_text(settings) -> str:
         f"срочные — каждые {_human_interval(config.NAG_INTERVALS['срочно'])}, "
         f"важные — каждые {_human_interval(config.NAG_INTERVALS['важно'])}, "
         f"обычные — каждые {_human_interval(config.NAG_INTERVALS['обычно'])}</i>",
+        *extra,
         "",
         f"Часовой пояс: {config.TIMEZONE_NAME}",
     ])
 
 
-def settings_keyboard(settings) -> InlineKeyboardMarkup:
+def settings_keyboard(settings, members=None) -> InlineKeyboardMarkup:
     rows = []
     for key, icon in (("mo", "☀️"), ("ev", "🌙")):
         field = "morning" if key == "mo" else "evening"
@@ -434,6 +467,14 @@ def settings_keyboard(settings) -> InlineKeyboardMarkup:
         InlineKeyboardButton("Выключить" if settings["nag_on"] else "Включить",
                              callback_data="s:ng:toggle"),
     ])
+    if members:
+        rows.append([InlineKeyboardButton(
+            "👥 Кого не включать в задачи «Всем»", callback_data="s:noop")])
+        for user in members[:10]:
+            mark = "🚫" if user["exclude_from_all"] else "✅"
+            rows.append([InlineKeyboardButton(
+                _cut(f"{mark} {user['full_name']}", config.MAX_BUTTON_TEXT),
+                callback_data=f"s:ex:{user['user_id']}")])
     rows.append([InlineKeyboardButton("✖️ Закрыть", callback_data="s:close")])
     return InlineKeyboardMarkup(rows)
 
@@ -473,7 +514,7 @@ def task_detail(task: Task) -> str:
         "",
         f"{emoji(task)} {escape(task['description'])}",
         "",
-        f"Ответственный: {escape(assignee(task))}",
+        f"Ответственный: {escape(assignee_detailed(task))}",
         f"Приоритет: {escape(task['priority'])}",
     ]
     if task["client_date"]:

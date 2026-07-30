@@ -99,7 +99,7 @@ async def _notify_privately(context: ContextTypes.DEFAULT_TYPE,
                             task: sqlite3.Row) -> list[str]:
     """Дублирует задачу в личку. Возвращает список тех, до кого не достучались."""
     if task["is_all"]:
-        members = db.chat_members(task["chat_id"])
+        members = db.all_task_members(task["chat_id"])
         recipients = [u for u in members if u["private_chat_id"]]
         unreachable = [u["full_name"] for u in members if not u["private_chat_id"]]
     else:

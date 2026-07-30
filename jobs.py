@@ -38,8 +38,10 @@ async def _broadcast(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
     for user in db.chat_members(chat_id, fallback=False):
         if not user["private_chat_id"]:
             continue
+        excluded = bool(user["exclude_from_all"])
         mine = [t for t in tasks
-                if t["is_all"] or t["assignee_id"] == user["user_id"]]
+                if t["assignee_id"] == user["user_id"]
+                or (t["is_all"] and not excluded)]
         if not mine:
             continue
         try:
@@ -85,8 +87,7 @@ async def morning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _nag_recipients(chat_id: int, task) -> list:
     if task["is_all"]:
-        return [u for u in db.chat_members(chat_id, fallback=False)
-                if u["private_chat_id"]]
+        return [u for u in db.all_task_members(chat_id) if u["private_chat_id"]]
     user = db.get_user(task["assignee_id"]) if task["assignee_id"] else None
     return [user] if user and user["private_chat_id"] else []
 

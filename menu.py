@@ -310,6 +310,18 @@ def _shift(value: str, minutes: int) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
+async def _redraw_settings(query, chat_id: int) -> None:
+    settings = db.get_settings(chat_id)
+    try:
+        await query.edit_message_text(
+            ui.settings_text(settings, chat_id), parse_mode=ParseMode.HTML,
+            reply_markup=ui.settings_keyboard(settings,
+                                              db.chat_members(chat_id, fallback=False)))
+    except TelegramError as exc:
+        if "not modified" not in str(exc).lower():
+            log.warning("Настройки: %s", exc)
+
+
 async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from jobs import schedule_chat_jobs
 
@@ -334,6 +346,21 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
     settings = db.get_settings(chat_id)
 
+    if parts[1] == "ex":
+        target = int(parts[2])
+        row = db.get_user(target)
+        if row is None:
+            await query.answer("Не знаю этого человека")
+            return
+        now_excluded = not row["exclude_from_all"]
+        db.set_exclude_from_all(target, now_excluded)
+        await query.answer(
+            f"{row['full_name']}: "
+            + ("не включаю в задачи «Всем»" if now_excluded
+               else "снова в задачах «Всем»"))
+        await _redraw_settings(query, chat_id)
+        return
+
     if parts[1] == "ng":
         if parts[2] == "toggle":
             db.update_settings(chat_id, nag_on=0 if settings["nag_on"] else 1)
@@ -348,13 +375,7 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             db.update_settings(chat_id, nag_until=new_time)
             await query.answer(f"Напоминаю до {new_time}")
-        settings = db.get_settings(chat_id)
-        try:
-            await query.edit_message_text(
-                ui.settings_text(settings), parse_mode=ParseMode.HTML,
-                reply_markup=ui.settings_keyboard(settings))
-        except TelegramError:
-            pass
+        await _redraw_settings(query, chat_id)
         return
 
     field = "morning" if parts[1] == "mo" else "evening"
@@ -368,13 +389,7 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
         await query.answer(new_time)
 
     schedule_chat_jobs(context.application, chat_id)
-    settings = db.get_settings(chat_id)
-    try:
-        await query.edit_message_text(
-            ui.settings_text(settings), parse_mode=ParseMode.HTML,
-            reply_markup=ui.settings_keyboard(settings))
-    except TelegramError:
-        pass
+    await _redraw_settings(query, chat_id)
 
 
 # ================================================================ история
@@ -506,7 +521,9 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await send("Настройки меняются в рабочей группе.")
             return True
         settings = db.get_settings(chat.id)
-        await send(ui.settings_text(settings), ui.settings_keyboard(settings))
+        await send(ui.settings_text(settings, chat.id),
+                   ui.settings_keyboard(settings,
+                                        db.chat_members(chat.id, fallback=False)))
 
     elif text == ui.BTN_HELP:
         await send(ui.HELP_TEXT)
