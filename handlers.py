@@ -265,11 +265,11 @@ async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except ValueError:
             await update.effective_message.reply_text("Формат: /history 7")
             return
+    import menu
     chat = update.effective_chat
-    if chat.type == "private":
-        await update.effective_message.reply_text("История доступна в рабочей группе.")
-        return
-    await update.effective_message.reply_html(ui.history_text(db.history(chat.id, days), days))
+    body, markup = menu._history_view(chat, update.effective_user.id, days,
+                                      only_mine=True)
+    await update.effective_message.reply_html(body, reply_markup=markup)
 
 
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -285,6 +285,9 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
     if chat.type == "private":
+        await update.effective_message.reply_text(
+            "Время напоминаний настраивается в рабочей группе — "
+            "оно общее для всех.")
         return
     s = db.get_settings(chat.id)
     await update.effective_message.reply_html(
@@ -496,9 +499,11 @@ async def ask_for_comment(context: ContextTypes.DEFAULT_TYPE, query, task, user,
 
     if private_chat:
         try:
+            # ForceReply здесь намеренно не ставим: в личке следующее сообщение
+            # и так очевидно относится к вопросу, а принудительный ответ
+            # перекрывает нижнее меню и залипает в клиентах
             await context.bot.send_message(
-                chat_id=private_chat, text=body, parse_mode=ParseMode.HTML,
-                reply_markup=ForceReply(input_field_placeholder="Комментарий"))
+                chat_id=private_chat, text=body, parse_mode=ParseMode.HTML)
             db.set_pending(private_chat, user.id, task["id"], mode=mode)
             await query.answer("Написал тебе в личку — комментарий там",
                                show_alert=query.message.chat.type != "private")
@@ -551,12 +556,26 @@ async def _finish(context: ContextTypes.DEFAULT_TYPE, query, task_id: int) -> No
 
 # =========================================================== ввод комментария
 
+async def _restore_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> None:
+    """Возвращает нижнее меню: заодно снимает залипший «ответ боту» в клиенте."""
+    try:
+        await context.bot.send_message(
+            chat_id=chat_id, text="Готово 👇",
+            reply_markup=ui.menu_keyboard(private=True))
+    except TelegramError:
+        pass
+
+
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+    chat = update.effective_chat
     user_id = update.effective_user.id
-    if db.get_pending(chat_id, user_id):
-        db.clear_pending(chat_id, user_id)
-        await update.effective_message.reply_text("Ок, задача осталась активной.")
+    if db.get_pending(chat.id, user_id):
+        db.clear_pending(chat.id, user_id)
+        await update.effective_message.reply_text(
+            "Ок, отменил ввод.",
+            reply_markup=ui.menu_keyboard(private=True)
+            if chat.type == "private" else None)
+    db.clear_draft(chat.id, user_id)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -607,6 +626,8 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     comment = msg.text.strip()
 
+    private = msg.chat.type == "private"
+
     if pending["mode"] == "edit":
         db.update_comment(task["id"], comment)
         await _update_task_cards(context, task["id"])
@@ -614,6 +635,8 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await msg.reply_html(
             "✏️ Комментарий обновлён.\n\n" + ui.task_detail(task),
             reply_markup=ui.task_detail_keyboard(task))
+        if private:
+            await _restore_menu(context, msg.chat_id)
         return
 
     db.close_task(task["id"], "done", full_name(user), comment=comment)
@@ -621,3 +644,5 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
     await refresh_dashboard(context, task["chat_id"])
     await msg.reply_html(
         f"✅ Задача #{task['id']} закрыта.\n💬 {escape(comment)}")
+    if private:
+        await _restore_menu(context, msg.chat_id)

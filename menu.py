@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from html import escape
 
-from telegram import ForceReply, Update
+from telegram import Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -118,19 +118,6 @@ async def _render_draft(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
                 chat_id=chat_id, text=text, parse_mode=ParseMode.HTML,
                 reply_markup=markup)
             db.update_draft(chat_id, user_id, message_id=msg.message_id)
-
-
-async def start_draft(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat = update.effective_chat
-    user = update.effective_user
-    if chat.type == "private":
-        await update.effective_message.reply_text(
-            "Задачи ставятся в рабочей группе.")
-        return
-    db.add_member(chat.id, user.id)
-    await sync_members(context, chat.id)
-    db.draft_start(chat.id, user.id, awaiting="text")
-    await _render_draft(context, chat.id, user.id, new=True)
 
 
 async def on_draft_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -306,15 +293,6 @@ def _shift(value: str, minutes: int) -> str:
     return f"{total // 60:02d}:{total % 60:02d}"
 
 
-async def show_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat = update.effective_chat
-    if chat.type == "private":
-        return
-    settings = db.get_settings(chat.id)
-    await update.effective_message.reply_html(
-        ui.settings_text(settings), reply_markup=ui.settings_keyboard(settings))
-
-
 async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from jobs import schedule_chat_jobs
 
@@ -383,16 +361,6 @@ async def on_settings_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # ================================================================ история
-
-async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    chat = update.effective_chat
-    if chat.type == "private":
-        return
-    days = config.DEFAULT_HISTORY_DAYS
-    await update.effective_message.reply_html(
-        ui.history_text(db.history(chat.id, days), days),
-        reply_markup=ui.history_keyboard())
-
 
 def _history_view(chat, user_id: int, days: int, only_mine: bool):
     """Возвращает текст и клавиатуру истории для группы или личного кабинета."""
