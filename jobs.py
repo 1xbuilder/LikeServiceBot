@@ -151,8 +151,31 @@ async def run_nag(context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> in
     return total
 
 
+async def cleanup_stale(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Убирает брошенные запросы комментария и черновики.
+
+    Заодно возвращает нижнее меню в личку: сообщение с обычной клавиатурой
+    снимает залипший «ответ боту», который иначе висит в клиенте, пока запрос
+    комментария остаётся неотвеченным.
+    """
+    for row in db.expired_pendings(config.COMMENT_TTL_MINUTES):
+        db.clear_pending(row["chat_id"], row["user_id"])
+        if db.is_private_chat(row["chat_id"]):
+            try:
+                await context.bot.send_message(
+                    chat_id=row["chat_id"],
+                    text="Запрос комментария снял — задача осталась как была.",
+                    reply_markup=ui.menu_keyboard(private=True))
+            except TelegramError:
+                pass
+
+    for row in db.expired_drafts(config.DRAFT_TTL_MINUTES):
+        db.clear_draft(row["chat_id"], row["user_id"])
+
+
 async def nag_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     reconcile_jobs(context.application)
+    await cleanup_stale(context)
     await run_nag(context)
 
 

@@ -479,5 +479,20 @@ def clear_pending(chat_id: int, user_id: int) -> None:
          (chat_id, user_id))
 
 
+def is_private_chat(chat_id: int) -> bool:
+    return _one("SELECT 1 FROM users WHERE private_chat_id = ?", (chat_id,)) is not None
+
+
+def expired_pendings(minutes: int) -> list[sqlite3.Row]:
+    cutoff = (datetime.now(config.TZ) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    return _all("SELECT * FROM pending_comments WHERE created_at < ?", (cutoff,))
+
+
+def expired_drafts(minutes: int) -> list[sqlite3.Row]:
+    cutoff = (datetime.now(config.TZ) - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    return _all("SELECT * FROM drafts WHERE updated_at IS NULL OR updated_at < ?",
+                (cutoff,))
+
+
 def clear_pending_for_task(task_id: int) -> None:
     _run("DELETE FROM pending_comments WHERE task_id = ?", (task_id,))

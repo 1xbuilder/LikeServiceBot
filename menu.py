@@ -4,7 +4,7 @@ from __future__ import annotations
 import logging
 from html import escape
 
-from telegram import Update
+from telegram import ReplyKeyboardRemove, Update
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
@@ -28,9 +28,26 @@ async def show_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int,
 
 
 async def cmd_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    private = update.effective_chat.type == "private"
-    await update.effective_message.reply_text(
-        "Меню внизу экрана 👇", reply_markup=ui.menu_keyboard(private=private))
+    """Показывает меню и снимает залипший «ответ боту», если он остался."""
+    chat = update.effective_chat
+    private = chat.type == "private"
+    user_id = update.effective_user.id
+
+    # брошенный запрос комментария — как раз то, за что цепляется reply-режим
+    db.clear_pending(chat.id, user_id)
+    db.clear_draft(chat.id, user_id)
+
+    if private:
+        # снимаем любую навязанную клавиатуру, потом ставим своё меню
+        try:
+            await context.bot.send_message(
+                chat_id=chat.id, text="Обновляю меню…",
+                reply_markup=ReplyKeyboardRemove())
+        except TelegramError:
+            pass
+    await context.bot.send_message(
+        chat_id=chat.id, text="Меню внизу экрана 👇",
+        reply_markup=ui.menu_keyboard(private=private))
 
 
 async def sync_members(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> int:

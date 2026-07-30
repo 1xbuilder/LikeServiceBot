@@ -139,6 +139,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                    update.effective_chat.id if update.effective_chat.type == "private" else None)
     private = update.effective_chat.type == "private"
     if private:
+        db.clear_pending(update.effective_chat.id, user.id)
         await update.message.reply_text(
             "Готово — теперь я смогу присылать тебе задачи в личку.\n\n"
             "Кнопка «🙋 Мои задачи» внизу покажет твои активные задачи.\n"
@@ -567,15 +568,16 @@ async def _restore_menu(context: ContextTypes.DEFAULT_TYPE, chat_id: int) -> Non
 
 
 async def cmd_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отменяет начатый ввод. В личке ещё и снимает залипший «ответ боту»."""
     chat = update.effective_chat
     user_id = update.effective_user.id
-    if db.get_pending(chat.id, user_id):
-        db.clear_pending(chat.id, user_id)
-        await update.effective_message.reply_text(
-            "Ок, отменил ввод.",
-            reply_markup=ui.menu_keyboard(private=True)
-            if chat.type == "private" else None)
+    had = db.get_pending(chat.id, user_id) is not None
+    db.clear_pending(chat.id, user_id)
     db.clear_draft(chat.id, user_id)
+    await update.effective_message.reply_text(
+        "Ок, отменил ввод." if had else "Нечего отменять — всё чисто.",
+        reply_markup=ui.menu_keyboard(private=True)
+        if chat.type == "private" else None)
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
