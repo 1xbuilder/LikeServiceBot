@@ -1,0 +1,27 @@
+[Unit]
+Description=Telegram task bot for managers
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=taskbot
+WorkingDirectory=/opt/taskbot
+ExecStart=/opt/taskbot/venv/bin/python /opt/taskbot/bot.py
+Restart=always
+RestartSec=10
+
+# логи уходят в journalctl
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=taskbot
+
+# базовая изоляция
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/taskbot
+
+[Install]
+WantedBy=multi-user.target

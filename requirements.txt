@@ -1,0 +1,5 @@
+python-telegram-bot[job-queue]>=21.0,<23.0
+tzdata; sys_platform == "win32"
+
+# Нужен только если в .env указан PROXY_URL вида socks5://
+# httpx[socks]
