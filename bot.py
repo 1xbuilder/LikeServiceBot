@@ -111,6 +111,8 @@ def main() -> None:
     app.add_handler(CallbackQueryHandler(menu.on_draft_callback, pattern=r"^d:"))
     app.add_handler(CallbackQueryHandler(menu.on_settings_callback, pattern=r"^s:"))
     app.add_handler(CallbackQueryHandler(menu.on_history_callback, pattern=r"^h:"))
+    app.add_handler(CallbackQueryHandler(
+        menu.on_task_callback, pattern=r"^(task|editc|reopen):"))
     app.add_handler(CallbackQueryHandler(handlers.on_callback))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handlers.on_text))
 

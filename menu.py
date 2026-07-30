@@ -394,20 +394,76 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup=ui.history_keyboard())
 
 
+def _history_view(chat, user_id: int, days: int, only_mine: bool):
+    """Возвращает текст и клавиатуру истории для группы или личного кабинета."""
+    private = chat.type == "private"
+    if private:
+        tasks = db.history_for_user(user_id, days, only_mine=only_mine)
+        return (ui.history_text(tasks, days, only_mine=only_mine),
+                ui.history_keyboard(days, only_mine, tasks, private=True))
+    tasks = db.history(chat.id, days)
+    return ui.history_text(tasks, days), ui.history_keyboard(days, only_mine)
+
+
 async def on_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query.message is None:
         await query.answer()
         return
-    days = int(query.data.split(":")[1])
-    await query.answer(f"{days} дн.")
+    parts = query.data.split(":")
+    days = int(parts[1])
+    only_mine = parts[2] != "all" if len(parts) > 2 else True
+
+    await query.answer()
+    text, markup = _history_view(query.message.chat, query.from_user.id, days, only_mine)
     try:
-        await query.edit_message_text(
-            ui.history_text(db.history(query.message.chat_id, days), days),
-            parse_mode=ParseMode.HTML, reply_markup=ui.history_keyboard())
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML,
+                                      reply_markup=markup)
     except TelegramError as exc:
         if "not modified" not in str(exc).lower():
             log.warning("История: %s", exc)
+
+
+async def on_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Карточка задачи в личном кабинете: правка комментария и возврат в работу."""
+    query = update.callback_query
+    if query.message is None:
+        await query.answer()
+        return
+    parts = query.data.split(":")
+    action, task_id = parts[0], int(parts[1])
+    days = int(parts[2]) if len(parts) > 2 else config.DEFAULT_HISTORY_DAYS
+    only_mine = parts[3] != "all" if len(parts) > 3 else True
+
+    task = db.get_task(task_id)
+    if task is None:
+        await query.answer("Задача не найдена")
+        return
+
+    if action == "task":
+        await query.answer()
+
+    elif action == "editc":
+        await handlers.ask_for_comment(context, query, task, query.from_user, mode="edit")
+        return
+
+    elif action == "reopen":
+        if task["status"] == "active":
+            await query.answer("Задача и так в работе")
+        else:
+            db.reopen_task(task_id)
+            await query.answer("Вернул в работу")
+            await handlers._update_task_cards(context, task_id)
+            await handlers.refresh_dashboard(context, task["chat_id"])
+            task = db.get_task(task_id)
+
+    try:
+        await query.edit_message_text(
+            ui.task_detail(task), parse_mode=ParseMode.HTML,
+            reply_markup=ui.task_detail_keyboard(task, days, only_mine))
+    except TelegramError as exc:
+        if "not modified" not in str(exc).lower():
+            log.warning("Карточка задачи: %s", exc)
 
 
 # ========================================================= роутер меню
@@ -456,12 +512,9 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                    ui.dashboard_keyboard(tasks))
 
     elif text == ui.BTN_HISTORY:
-        if not in_group:
-            await send("История доступна в рабочей группе.")
-            return True
         days = config.DEFAULT_HISTORY_DAYS
-        await send(ui.history_text(db.history(chat.id, days), days),
-                   ui.history_keyboard())
+        body, markup = _history_view(chat, user.id, days, only_mine=True)
+        await send(body, markup)
 
     elif text == ui.BTN_SETTINGS:
         if not in_group:

@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS pending_comments (
     user_id    INTEGER NOT NULL,
     task_id    INTEGER NOT NULL,
     created_at TEXT    NOT NULL,
+    mode       TEXT    NOT NULL DEFAULT 'close',
     PRIMARY KEY (chat_id, user_id)
 );
 
@@ -114,6 +115,7 @@ MIGRATIONS = [
     ("chat_settings", "nag_on", "nag_on INTEGER NOT NULL DEFAULT 1"),
     ("chat_settings", "nag_until", "nag_until TEXT NOT NULL DEFAULT '22:00'"),
     ("drafts", "updated_at", "updated_at TEXT"),
+    ("pending_comments", "mode", "mode TEXT NOT NULL DEFAULT 'close'"),
 ]
 
 
@@ -261,6 +263,9 @@ def clear_draft(chat_id: int, user_id: int) -> None:
 def add_task(chat_id: int, author_id: int, author_name: str, assignee_id: int | None,
              assignee_name: str, is_all: bool, description: str, priority: str,
              client_date: str | None, needs_comment: bool) -> int:
+    # гарантируем строку настроек: по ней сверка планировщика находит чат
+    # и включает утренние, вечерние напоминания
+    get_settings(chat_id)
     cur = _run(
         """INSERT INTO tasks (chat_id, created_at, author_id, author_name, assignee_id,
                               assignee_name, is_all, description, priority, client_date,
@@ -294,6 +299,43 @@ def backdate_task(task_id: int, days: int = 1) -> bool:
     _run("UPDATE tasks SET created_at = ? WHERE id = ?",
          (created.isoformat(timespec="seconds"), task_id))
     return True
+
+
+def update_comment(task_id: int, comment: str) -> None:
+    _run("UPDATE tasks SET comment_text = ? WHERE id = ?", (comment, task_id))
+
+
+def reopen_task(task_id: int) -> None:
+    """Возвращает закрытую задачу в работу. Комментарий сохраняем как след правки."""
+    _run(
+        """UPDATE tasks SET status = 'active', completed_at = NULL, completed_by = NULL,
+                            last_nag_at = NULL, snooze_until = NULL
+           WHERE id = ?""",
+        (task_id,),
+    )
+
+
+def user_chats(user_id: int) -> list[int]:
+    return [r["chat_id"] for r in
+            _all("SELECT chat_id FROM chat_members WHERE user_id = ?", (user_id,))]
+
+
+def history_for_user(user_id: int, days: int, only_mine: bool = True) -> list[sqlite3.Row]:
+    """История по всем чатам, где состоит человек. Для личного кабинета."""
+    chats = user_chats(user_id)
+    if not chats:
+        return []
+    since = (datetime.now(config.TZ) - timedelta(days=days)).isoformat(timespec="seconds")
+    marks = ",".join("?" * len(chats))
+    mine = " AND (assignee_id = ? OR is_all = 1)" if only_mine else ""
+    params = [*chats, since] + ([user_id] if only_mine else [])
+    return _all(
+        f"""SELECT * FROM tasks
+            WHERE chat_id IN ({marks}) AND status IN ('done','cancelled')
+              AND completed_at >= ?{mine}
+            ORDER BY completed_at DESC""",
+        params,
+    )
 
 
 def active_tasks(chat_id: int, assignee_id: int | None = None) -> list[sqlite3.Row]:
@@ -412,13 +454,16 @@ def all_chats() -> list[sqlite3.Row]:
 
 # ------------------------------------------------- ожидание комментария
 
-def set_pending(chat_id: int, user_id: int, task_id: int) -> None:
+def set_pending(chat_id: int, user_id: int, task_id: int,
+                mode: str = "close") -> None:
+    """mode: close — закрыть задачу комментарием, edit — переписать комментарий."""
     _run(
-        """INSERT INTO pending_comments (chat_id, user_id, task_id, created_at)
-           VALUES (?,?,?,?)
+        """INSERT INTO pending_comments (chat_id, user_id, task_id, created_at, mode)
+           VALUES (?,?,?,?,?)
            ON CONFLICT(chat_id, user_id) DO UPDATE SET
-               task_id = excluded.task_id, created_at = excluded.created_at""",
-        (chat_id, user_id, task_id, now()),
+               task_id = excluded.task_id, created_at = excluded.created_at,
+               mode = excluded.mode""",
+        (chat_id, user_id, task_id, now(), mode),
     )
 
 

@@ -159,10 +159,13 @@ def dashboard_text(tasks: list[Task]) -> str:
     return _limit("\n".join(lines))
 
 
-def history_text(tasks: list[Task], days: int) -> str:
+def history_text(tasks: list[Task], days: int, only_mine: bool | None = None) -> str:
+    scope = ""
+    if only_mine is not None:
+        scope = " · только мои" if only_mine else " · вся группа"
     if not tasks:
-        return f"За последние {days} дн. закрытых задач нет."
-    lines = [f"🗂 <b>История за {days} дн.</b>", ""]
+        return f"🗂 <b>История за {days} дн.{scope}</b>\n\nЗакрытых задач нет."
+    lines = [f"🗂 <b>История за {days} дн.{scope}</b>", ""]
     for t in tasks:
         mark = "✅" if t["status"] == "done" else "✖️"
         when = (t["completed_at"] or "")[:16].replace("T", " ")
@@ -248,6 +251,12 @@ HELP_TEXT = """<b>Бот-задачник</b>
 🗂 <b>История</b> — закрытые и отменённые, с комментариями.
 ⚙️ <b>Настройки</b> — время утреннего и вечернего напоминания.
 
+<b>В личке со мной</b> — личный кабинет: свои задачи, история, правки.
+Чтобы не грузить общий чат, комментарии при закрытии я спрашиваю там же.
+В истории можно открыть любую закрытую задачу и переписать комментарий
+или вернуть её в работу — общий чат об этих правках не узнает,
+карточка просто обновится на месте.
+
 Наверху чата закреплён список всех активных задач — он обновляется сам.
 Закрыть задачу можно оттуда, из личных сообщений или из напоминания.
 
@@ -274,6 +283,7 @@ GROUP_MENU = [
 ]
 PRIVATE_MENU = [
     [BTN_MY],
+    [BTN_LIST, BTN_HISTORY],
     [BTN_HELP],
 ]
 ALL_BUTTONS = {BTN_NEW, BTN_LIST, BTN_MY, BTN_HISTORY, BTN_SETTINGS, BTN_HELP}
@@ -428,9 +438,73 @@ def settings_keyboard(settings) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def history_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("7 дней", callback_data="h:7"),
-        InlineKeyboardButton("14 дней", callback_data="h:14"),
-        InlineKeyboardButton("30 дней", callback_data="h:30"),
-    ]])
+def history_keyboard(days: int = 7, only_mine: bool = True,
+                     tasks: list[Task] | None = None,
+                     private: bool = False) -> InlineKeyboardMarkup:
+    scope = "my" if only_mine else "all"
+    rows = [[
+        InlineKeyboardButton(("✅ " if days == d else "") + f"{d} дн.",
+                             callback_data=f"h:{d}:{scope}")
+        for d in (7, 14, 30)
+    ]]
+    if private:
+        rows.append([InlineKeyboardButton(
+            "👥 Показать всю группу" if only_mine else "🙋 Показать только мои",
+            callback_data=f"h:{days}:{'all' if only_mine else 'my'}")])
+        for task in (tasks or [])[:8]:
+            mark = "✅" if task["status"] == "done" else "✖️"
+            rows.append([InlineKeyboardButton(
+                _cut(f"{mark} #{task['id']} {task['description']}", config.MAX_BUTTON_TEXT),
+                callback_data=f"task:{task['id']}:{days}:{scope}")])
+    return InlineKeyboardMarkup(rows)
+
+
+def task_detail(task: Task) -> str:
+    """Подробная карточка для личного кабинета."""
+    if task["status"] == "done":
+        head = "✅ <b>Выполнена</b>"
+    elif task["status"] == "cancelled":
+        head = "✖️ <b>Отменена</b>"
+    else:
+        head = "🔵 <b>В работе</b>"
+
+    lines = [
+        f"{head} — задача #{task['id']}",
+        "",
+        f"{emoji(task)} {escape(task['description'])}",
+        "",
+        f"Ответственный: {escape(assignee(task))}",
+        f"Приоритет: {escape(task['priority'])}",
+    ]
+    if task["client_date"]:
+        lines.append(f"Клиент: {escape(task['client_date'])}")
+    if task["author_name"]:
+        lines.append(f"Поставил: {escape(task['author_name'])}")
+    if task["completed_at"]:
+        when = task["completed_at"][:16].replace("T", " ")
+        lines.append(f"Закрыл: {escape(task['completed_by'] or '—')}, {when}")
+    if task["comment_text"]:
+        lines.append("")
+        lines.append(f"💬 {escape(task['comment_text'])}")
+    elif task["needs_comment"]:
+        lines.append("")
+        lines.append("💬 <i>комментарий не заполнен</i>")
+    return "\n".join(lines)
+
+
+def task_detail_keyboard(task: Task, days: int = 7,
+                         only_mine: bool = True) -> InlineKeyboardMarkup:
+    scope = "my" if only_mine else "all"
+    rows = []
+    if task["status"] == "active":
+        rows.append([_done_button(task)])
+    else:
+        rows.append([InlineKeyboardButton(
+            "✏️ Переписать комментарий" if task["comment_text"]
+            else "✏️ Добавить комментарий",
+            callback_data=f"editc:{task['id']}:{days}:{scope}")])
+        rows.append([InlineKeyboardButton(
+            "↩️ Вернуть в работу", callback_data=f"reopen:{task['id']}:{days}:{scope}")])
+    rows.append([InlineKeyboardButton(
+        "⬅️ К истории", callback_data=f"h:{days}:{scope}")])
+    return InlineKeyboardMarkup(rows)

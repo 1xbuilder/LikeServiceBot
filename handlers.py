@@ -77,16 +77,19 @@ def _strip_task_buttons(markup: InlineKeyboardMarkup | None,
 
 
 async def _update_task_cards(context: ContextTypes.DEFAULT_TYPE, task_id: int) -> None:
-    """Перерисовывает все персональные/групповые карточки задачи."""
+    """Перерисовывает все карточки задачи: в группе и в личках."""
     task = db.get_task(task_id)
     if task is None:
         return
-    text = ui.closed_card(task)
+    if task["status"] == "active":
+        text, markup = ui.task_card(task), ui.task_keyboard(task)
+    else:
+        text, markup = ui.closed_card(task), None
     for row in db.task_messages(task_id):
         try:
             await context.bot.edit_message_text(
                 chat_id=row["chat_id"], message_id=row["message_id"],
-                text=text, parse_mode=ParseMode.HTML, reply_markup=None,
+                text=text, parse_mode=ParseMode.HTML, reply_markup=markup,
             )
         except TelegramError:
             pass
@@ -467,27 +470,54 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if action == "done":
         if task["needs_comment"]:
-            db.set_pending(query.message.chat_id, user.id, task_id)
-            await query.answer("Напиши комментарий сообщением")
-            mention = f'<a href="tg://user?id={user.id}">{escape(full_name(user))}</a>'
-            try:
-                await context.bot.send_message(
-                    chat_id=query.message.chat_id,
-                    text=(f"{mention}, задача #{task_id} — "
-                          f"<b>{escape(task['description'])}</b>\n"
-                          "Напиши комментарий одним сообщением, и я её закрою.\n"
-                          "<i>Отменить ввод: /skip</i>"),
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=ForceReply(selective=True,
-                                            input_field_placeholder="Комментарий"),
-                )
-            except TelegramError as exc:
-                log.warning("Не смог запросить комментарий: %s", exc)
+            await ask_for_comment(context, query, task, user)
             return
 
         db.close_task(task_id, "done", full_name(user))
         await query.answer("Готово ✅")
         await _finish(context, query, task_id)
+
+
+async def ask_for_comment(context: ContextTypes.DEFAULT_TYPE, query, task, user,
+                          mode: str = "close") -> None:
+    """Просит комментарий в личке; если личка недоступна — в текущем чате."""
+    row = db.get_user(user.id)
+    private_chat = row["private_chat_id"] if row else None
+
+    if mode == "edit":
+        body = (f"Задача #{task['id']} — <b>{escape(task['description'])}</b>\n"
+                f"Текущий комментарий: {escape(task['comment_text'] or '—')}\n\n"
+                "Напиши новый комментарий одним сообщением.\n"
+                "<i>Отменить: /skip</i>")
+    else:
+        body = (f"Задача #{task['id']} — <b>{escape(task['description'])}</b>\n\n"
+                "Напиши комментарий одним сообщением, и я её закрою.\n"
+                "<i>Отменить: /skip</i>")
+
+    if private_chat:
+        try:
+            await context.bot.send_message(
+                chat_id=private_chat, text=body, parse_mode=ParseMode.HTML,
+                reply_markup=ForceReply(input_field_placeholder="Комментарий"))
+            db.set_pending(private_chat, user.id, task["id"], mode=mode)
+            await query.answer("Написал тебе в личку — комментарий там",
+                               show_alert=query.message.chat.type != "private")
+            return
+        except TelegramError as exc:
+            log.info("Личка недоступна (%s), спрашиваю в чате", exc)
+
+    # запасной путь: человек не писал боту в личку
+    mention = f'<a href="tg://user?id={user.id}">{escape(full_name(user))}</a>'
+    db.set_pending(query.message.chat_id, user.id, task["id"], mode=mode)
+    await query.answer("Напиши комментарий сообщением")
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, text=f"{mention}, {body}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=ForceReply(selective=True,
+                                    input_field_placeholder="Комментарий"))
+    except TelegramError as exc:
+        log.warning("Не смог запросить комментарий: %s", exc)
 
 
 async def _remove_button(query, task_id: int) -> None:
@@ -568,25 +598,26 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     task = db.get_task(pending["task_id"])
     db.clear_pending(msg.chat_id, user.id)
-    if task is None or task["status"] != "active":
+    if task is None:
+        await msg.reply_text("Задача не найдена.")
+        return
+    if pending["mode"] != "edit" and task["status"] != "active":
         await msg.reply_text("Задача уже закрыта.")
         return
 
     comment = msg.text.strip()
+
+    if pending["mode"] == "edit":
+        db.update_comment(task["id"], comment)
+        await _update_task_cards(context, task["id"])
+        task = db.get_task(task["id"])
+        await msg.reply_html(
+            "✏️ Комментарий обновлён.\n\n" + ui.task_detail(task),
+            reply_markup=ui.task_detail_keyboard(task))
+        return
+
     db.close_task(task["id"], "done", full_name(user), comment=comment)
     await _update_task_cards(context, task["id"])
     await refresh_dashboard(context, task["chat_id"])
     await msg.reply_html(
         f"✅ Задача #{task['id']} закрыта.\n💬 {escape(comment)}")
-
-    # если закрывали из лички — продублируем факт в группу
-    if msg.chat_id != task["chat_id"]:
-        try:
-            await context.bot.send_message(
-                chat_id=task["chat_id"],
-                text=(f"✅ <b>{escape(full_name(user))}</b> закрыл задачу #{task['id']} — "
-                      f"{escape(task['description'])}\n💬 {escape(comment)}"),
-                parse_mode=ParseMode.HTML,
-            )
-        except TelegramError:
-            pass
