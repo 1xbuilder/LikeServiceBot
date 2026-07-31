@@ -120,10 +120,17 @@ OVERDUE_HOURS = {
     "обычно": float(os.getenv("OVERDUE_NORMAL", "8")),
 }
 
-# Как часто напоминать о просроченной задаче — процент от отведённого срока.
-# Дали 15 минут → напоминаю каждые 5 (сработает нижняя граница),
-# дали два дня → каждый час (верхняя граница). Границы в минутах.
-NAG_PERCENT = float(os.getenv("NAG_PERCENT", "10"))
+# Как часто напоминать о просроченной задаче — минуты, по приоритету.
+NAG_INTERVALS = {
+    "срочно": int(os.getenv("NAG_URGENT", "15")),
+    "важно": int(os.getenv("NAG_IMPORTANT", "120")),
+    "обычно": int(os.getenv("NAG_NORMAL", "240")),
+}
+
+# Необязательный режим: если задать NAG_PERCENT больше нуля, интервал считается
+# как процент от отведённого срока (с границами NAG_MIN..NAG_MAX), а таблица
+# выше не используется. По умолчанию выключен — интервалы статичные.
+NAG_PERCENT = float(os.getenv("NAG_PERCENT", "0"))
 NAG_MIN_MINUTES = int(os.getenv("NAG_MIN", "5"))
 NAG_MAX_MINUTES = int(os.getenv("NAG_MAX", "60"))
 

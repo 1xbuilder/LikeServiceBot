@@ -600,11 +600,19 @@ def deadline(task: sqlite3.Row) -> datetime:
 
 
 def nag_interval(task: sqlite3.Row) -> int:
-    """Через сколько минут напомнить снова — процент от отведённого срока."""
-    created = datetime.fromisoformat(task["created_at"])
-    total = (deadline(task) - created).total_seconds() / 60
-    step = total * config.NAG_PERCENT / 100
-    return int(max(config.NAG_MIN_MINUTES, min(config.NAG_MAX_MINUTES, step)))
+    """Через сколько минут напомнить снова.
+
+    По умолчанию интервал статичный и зависит от приоритета. Если в настройках
+    включён процентный режим (NAG_PERCENT > 0), считаем долю от срока.
+    """
+    if config.NAG_PERCENT > 0:
+        created = datetime.fromisoformat(task["created_at"])
+        total = (deadline(task) - created).total_seconds() / 60
+        step = total * config.NAG_PERCENT / 100
+        return int(max(config.NAG_MIN_MINUTES,
+                       min(config.NAG_MAX_MINUTES, step)))
+    return config.NAG_INTERVALS.get(task["priority"],
+                                    config.NAG_INTERVALS["обычно"])
 
 
 def overdue_by(task: sqlite3.Row, moment: datetime | None = None) -> timedelta:
