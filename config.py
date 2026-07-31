@@ -112,22 +112,28 @@ DEFAULT_EVENING = os.getenv("DEFAULT_EVENING", "19:30")
 DEFAULT_MORNING = os.getenv("DEFAULT_MORNING", "09:45")
 
 # --- просрочка ---
-# Через сколько суток незакрытая задача считается просроченной.
-# 1 = не закрыл в день постановки → со следующего утра просрочена.
-OVERDUE_DAYS = int(os.getenv("OVERDUE_DAYS", "1"))
-
-# Как часто напоминать в личку о просроченной задаче, минуты.
-NAG_INTERVALS = {
-    "срочно": int(os.getenv("NAG_URGENT", "30")),
-    "важно": int(os.getenv("NAG_IMPORTANT", "120")),
-    "обычно": int(os.getenv("NAG_NORMAL", "720")),
+# Через сколько часов после постановки незакрытая задача считается просроченной.
+# Задачи разбирают в течение дня, поэтому срок короткий и зависит от приоритета.
+OVERDUE_HOURS = {
+    "срочно": float(os.getenv("OVERDUE_URGENT", "1")),
+    "важно": float(os.getenv("OVERDUE_IMPORTANT", "4")),
+    "обычно": float(os.getenv("OVERDUE_NORMAL", "8")),
 }
+
+# Как часто напоминать о просроченной задаче — процент от отведённого срока.
+# Дали 15 минут → напоминаю каждые 5 (сработает нижняя граница),
+# дали два дня → каждый час (верхняя граница). Границы в минутах.
+NAG_PERCENT = float(os.getenv("NAG_PERCENT", "10"))
+NAG_MIN_MINUTES = int(os.getenv("NAG_MIN", "5"))
+NAG_MAX_MINUTES = int(os.getenv("NAG_MAX", "60"))
 
 # До какого часа можно напоминать (начало окна = время утреннего напоминания).
 DEFAULT_NAG_UNTIL = os.getenv("DEFAULT_NAG_UNTIL", "22:00")
 
-# Как часто планировщик проверяет, кому пора напомнить, секунды.
-NAG_CHECK_SECONDS = int(os.getenv("NAG_CHECK_SECONDS", "300"))
+# Как часто бот сверяется с часами внутри себя, секунды. Людям при этом
+# ничего не шлётся — сообщение уходит только когда наступил срок или
+# подошёл следующий интервал напоминания.
+NAG_CHECK_SECONDS = int(os.getenv("NAG_CHECK_SECONDS", "60"))
 
 # На сколько откладывает кнопка «Отложить», минуты.
 SNOOZE_MINUTES = int(os.getenv("SNOOZE_MINUTES", "60"))

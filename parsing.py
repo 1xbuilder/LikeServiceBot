@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
 
 PRIORITY_ALIASES = {
     "срочно": "срочно", "срочная": "срочно", "срочный": "срочно", "urgent": "срочно",
@@ -133,6 +134,138 @@ def parse_task(text: str, assignee_from_reply: bool = False) -> ParsedTask:
 
 
 TIME_SETTING_RE = re.compile(r"^([01]?\d|2[0-3])[:.]([0-5]\d)$")
+
+
+# ------------------------------------------------------------- сроки задачи
+# «в течение 15 минут», «до 18:50», «завтра к 14:00», «через 2 часа»
+
+# во сколько считать «утро», «обед», «вечер», «конец дня»
+PART_OF_DAY = {
+    "утро": (10, 0), "утром": (10, 0),
+    "обед": (13, 0), "обеду": (13, 0), "полдень": (12, 0),
+    "день": (15, 0), "днем": (15, 0), "днём": (15, 0),
+    "вечер": (18, 0), "вечеру": (18, 0), "вечером": (18, 0),
+    "ночь": (23, 0), "ночи": (23, 0),
+}
+DAY_END = (18, 0)          # «сегодня» / «завтра» без уточнения времени
+
+_UNIT_MINUTES = [
+    (("недел",), 7 * 24 * 60),
+    (("сутк", "сутки", "день", "дня", "дней", "дн"), 24 * 60),
+    (("час", "часа", "часов", "ч"), 60),
+    (("минут", "мин", "м"), 1),
+]
+
+# «в течение 15 минут», «через 2 часа», «за 30 мин», «на 1 день»
+_DURATION_RE = re.compile(
+    r"(?:в\s+течени[еи]|через|за|на)?\s*(\d+(?:[.,]\d+)?)\s*"
+    r"(недел\w*|сутк\w*|дн\w*|день|час\w*|ч|минут\w*|мин|м)\b",
+    re.IGNORECASE)
+_HALF_RE = re.compile(r"\b(?:через\s+)?пол\s*(часа|час|дня|суток)\b", re.IGNORECASE)
+_HOUR_RE = re.compile(r"\b(?:через\s+)?час\b", re.IGNORECASE)
+
+# «до 18:50», «к 18-50», «в 9:00», просто «18:50»
+_CLOCK_RE = re.compile(r"\b(?:до|к|в|ко)?\s*([01]?\d|2[0-3])[:.\-]([0-5]\d)\b",
+                       re.IGNORECASE)
+_DATE_RE = re.compile(r"\b(\d{1,2})[./](\d{1,2})(?:[./](\d{2,4}))?\b")
+
+_DAY_SHIFT = {"сегодня": 0, "завтра": 1, "послезавтра": 2}
+_WEEKDAYS = {
+    "пн": 0, "понедельник": 0, "вт": 1, "вторник": 1, "ср": 2, "среда": 2, "среду": 2,
+    "чт": 3, "четверг": 3, "пт": 4, "пятница": 4, "пятницу": 4,
+    "сб": 5, "суббота": 5, "субботу": 5, "вс": 6, "воскресенье": 6,
+}
+
+
+def _unit_minutes(word: str) -> int | None:
+    low = word.lower()
+    for prefixes, minutes in _UNIT_MINUTES:
+        if any(low.startswith(p) for p in prefixes):
+            return minutes
+    return None
+
+
+def parse_deadline(text: str, now: datetime) -> datetime | None:
+    """Превращает «в течение 15 минут» или «до 18:50» в конкретный момент.
+
+    Возвращает None, если срока в тексте нет — тогда бот берёт срок
+    по приоритету. Отсчёт длительностей идёт от now.
+    """
+    if not text:
+        return None
+    low = " " + text.lower().replace("ё", "е") + " "
+
+    # 1. длительность: «в течение 15 минут», «через 2 часа», «полчаса»
+    if _HALF_RE.search(low):
+        word = _HALF_RE.search(low).group(1)
+        minutes = 30 if word.startswith("час") else 12 * 60
+        return now + timedelta(minutes=minutes)
+
+    match = _DURATION_RE.search(low)
+    if match:
+        unit = _unit_minutes(match.group(2))
+        if unit:
+            amount = float(match.group(1).replace(",", "."))
+            if 0 < amount <= 366 * 24 * 60:
+                return now + timedelta(minutes=amount * unit)
+
+    # «через час» без числа
+    if re.search(r"\bчерез\s+час\b", low):
+        return now + timedelta(hours=1)
+
+    # 2. конкретный момент: день + время
+    day = None
+    clean = low          # из строки уберём дату, чтобы «01.08» не читалось как 01:08
+    for word, shift in _DAY_SHIFT.items():
+        if re.search(rf"\b{word}\b", low):
+            day = (now + timedelta(days=shift)).date()
+            break
+    if day is None:
+        for word, index in _WEEKDAYS.items():
+            if re.search(rf"\b{word}\b", low):
+                ahead = (index - now.weekday()) % 7 or 7
+                day = (now + timedelta(days=ahead)).date()
+                break
+    if day is None:
+        date_match = _DATE_RE.search(low)
+        if date_match:
+            try:
+                d, m = int(date_match.group(1)), int(date_match.group(2))
+                year = int(date_match.group(3) or now.year)
+                if year < 100:
+                    year += 2000
+                day = date(year, m, d)
+                clean = low[:date_match.start()] + " " + low[date_match.end():]
+            except ValueError:
+                day = None
+
+    clock = _CLOCK_RE.search(clean)
+    hour = minute = None
+    if clock:
+        hour, minute = int(clock.group(1)), int(clock.group(2))
+    elif re.search(r"\bконц[ауе]?\s+дня\b|\bконец\s+дня\b", clean):
+        hour, minute = DAY_END
+    else:
+        for word, (h, m) in PART_OF_DAY.items():
+            if re.search(rf"\b{word}\b", clean):
+                hour, minute = h, m
+                break
+
+    if hour is None and day is None:
+        return None
+    if hour is None:
+        hour, minute = DAY_END
+    if day is None:
+        day = now.date()
+
+    moment = datetime.combine(day, time(hour, minute), tzinfo=now.tzinfo)
+
+    # «до 9:00», сказанное вечером, почти наверняка про завтра;
+    # «до 18:50», сказанное в 19:00, — про сегодня, человек уже опаздывает
+    if moment < now and not any(re.search(rf"\b{w}\b", low) for w in _DAY_SHIFT):
+        if now - moment > timedelta(hours=3):
+            moment += timedelta(days=1)
+    return moment
 
 
 def parse_time(value: str) -> str:

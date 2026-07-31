@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 
 import db
@@ -89,6 +89,8 @@ def task_card(task: Task, files_count: int = 0) -> str:
     ]
     if task["client_date"]:
         lines.append(f"Клиент: <b>{escape(task['client_date'])}</b>")
+    if has_deadline(task) and task["status"] == "active":
+        lines.append(deadline_line(task))
     if task["needs_comment"]:
         lines.append("💬 При закрытии нужен комментарий")
     if files_count:
@@ -129,13 +131,58 @@ def closed_card(task: Task, files_count: int = 0) -> str:
     return "\n".join(lines)
 
 
-def overdue_days(task) -> int:
-    """Сколько полных суток задача висит сверх отведённого срока. 0 — не просрочена."""
+def overdue_delta(task) -> timedelta:
+    """На сколько задача просрочена. Ноль — срок ещё не вышел."""
     if task["status"] != "active":
-        return 0
-    created = datetime.fromisoformat(task["created_at"]).date()
-    today = datetime.now(config.TZ).date()
-    return max(0, (today - created).days - (config.OVERDUE_DAYS - 1))
+        return timedelta(0)
+    try:
+        late = db.overdue_by(task)
+    except ValueError:
+        return timedelta(0)
+    return late if late > timedelta(0) else timedelta(0)
+
+
+def is_overdue(task) -> bool:
+    return overdue_delta(task) > timedelta(0)
+
+
+def has_deadline(task) -> bool:
+    """Срок распознан из текста, а не выведен из приоритета."""
+    return bool(field(task, "deadline_at"))
+
+
+def deadline_label(task) -> str:
+    """«сегодня до 18:50», «завтра до 14:00», «03.08 до 10:00»."""
+    moment = db.deadline(task)
+    days = (moment.date() - datetime.now(config.TZ).date()).days
+    when = {0: "сегодня", 1: "завтра", 2: "послезавтра"}.get(days)
+    if when is None:
+        when = moment.strftime("%d.%m")
+    return f"{when} до {moment.strftime('%H:%M')}"
+
+
+def deadline_line(task) -> str:
+    """Строка со сроком и остатком времени для карточки задачи."""
+    late = overdue_delta(task)
+    if late:
+        return f"🔥 <b>Срок вышел</b> ({deadline_label(task)}), просрочено на {human_late(late)}"
+    left = db.deadline(task) - datetime.now(config.TZ)
+    return f"⏳ Срок: <b>{deadline_label(task)}</b> — осталось {human_late(left)}"
+
+
+def human_late(delta: timedelta) -> str:
+    """«2 ч 15 мин», «3 ч», «1 день 4 ч» — коротко и без хвостов."""
+    minutes = int(delta.total_seconds() // 60)
+    days, rest = divmod(minutes, 1440)
+    hours, mins = divmod(rest, 60)
+    parts = []
+    if days:
+        parts.append(_plural_days(days))
+    if hours:
+        parts.append(f"{hours} ч")
+    if mins and not days:
+        parts.append(f"{mins} мин")
+    return " ".join(parts) or "меньше минуты"
 
 
 def _plural_days(n: int) -> str:
@@ -148,14 +195,16 @@ def _plural_days(n: int) -> str:
 
 def task_line(task) -> str:
     """Строка для дашборда / списков."""
-    late = overdue_days(task)
+    late = overdue_delta(task)
     parts = []
     if late:
         parts.append("🔥 ")
     parts.append(f"{emoji(task)} <b>{escape(assignee(task))}</b> — {escape(task['description'])}")
     if late:
-        parts.append(f" <b>[просрочено, {_plural_days(late)}]</b>")
-    if task["client_date"]:
+        parts.append(f" <b>[просрочено на {human_late(late)}]</b>")
+    if has_deadline(task) and not late:
+        parts.append(f" <i>({deadline_label(task)})</i>")
+    elif task["client_date"]:
         parts.append(f" <i>(клиент: {escape(task['client_date'])})</i>")
     if task["needs_comment"]:
         parts.append(" 💬")
@@ -163,10 +212,13 @@ def task_line(task) -> str:
 
 
 def nag_card(task) -> str:
-    late = overdue_days(task)
-    interval = config.NAG_INTERVALS.get(task["priority"], 720)
+    late = overdue_delta(task)
+    interval = db.nag_interval(task)
+    first = not field(task, "last_nag_at")
+    head = ("⏰ <b>Срок вышел — задачу нужно закрыть</b>" if first
+            else f"🔥 <b>Просрочено на {human_late(late)}</b>")
     lines = [
-        f"🔥 <b>Просрочено: {_plural_days(late)}</b>",
+        head,
         "",
         f"{emoji(task)} <b>Задача #{task['id']}</b> ({task['priority']})",
         escape(task["description"]),
@@ -339,8 +391,8 @@ def morning_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup | None:
 def task_list_text(title: str, tasks: list[Task]) -> str:
     if not tasks:
         return f"<b>{title}</b>\n\nПусто 🎉"
-    late = [t for t in tasks if overdue_days(t)]
-    fresh = [t for t in tasks if not overdue_days(t)]
+    late = [t for t in tasks if is_overdue(t)]
+    fresh = [t for t in tasks if not is_overdue(t)]
     lines = [f"<b>{title}</b>"]
     if late:
         lines += ["", "🔥 <b>Просрочено</b>"]
@@ -356,7 +408,7 @@ HELP_TEXT = """<b>Бот-задачник</b>
 Всё делается кнопками внизу экрана:
 
 ➕ <b>Новая задача</b> — конструктор: пишешь текст, тапами выбираешь исполнителя,
-приоритет, когда ждать клиента и нужен ли комментарий при закрытии.
+приоритет, срок и нужен ли комментарий при закрытии.
 К задаче можно приложить фото или файл: пока открыт конструктор, просто
 пришли их сообщением. Подпись к фото станет текстом задачи, если он ещё не задан.
 
@@ -373,6 +425,11 @@ HELP_TEXT = """<b>Бот-задачник</b>
 
 Наверху чата закреплён список всех активных задач — он обновляется сам.
 Закрыть задачу можно оттуда, из личных сообщений или из напоминания.
+
+Срок понимаю словами: «до 18:50», «в течение 15 минут», «завтра к 14:00»,
+«через 2 часа». Когда время выйдет, напишу исполнителю в личку один раз,
+дальше буду повторять тем чаще, чем короче был срок. Если срок не указан,
+беру запас по приоритету: срочная — час, важная — 4 часа, обычная — 8 часов.
 
 Если задача помечена 💬, при закрытии бот попросит написать комментарий.
 Автору такой задачи я пришлю отчёт исполнителя на проверку: <b>👍 Принять</b>
@@ -450,7 +507,8 @@ def draft_text(draft, files: int = 0) -> str:
     if draft["awaiting"] == "text":
         lines += ["", "✍️ <b>Напиши текст задачи сообщением</b>"]
     elif draft["awaiting"] == "date":
-        lines += ["", "✍️ <b>Напиши, когда ждать клиента</b> (например: после обеда)"]
+        lines += ["", "✍️ <b>Напиши срок</b> — «до 18:50», «в течение 15 минут», "
+                      "«завтра к 14:00». Я пойму и напомню, когда время выйдет."]
     return "\n".join(lines)
 
 
@@ -537,12 +595,16 @@ def settings_text(settings, chat_id: int | None = None) -> str:
         "<i>все незакрытые задачи за день</i>",
         "",
         f"🔥 Просрочка: <b>{'напоминаю' if settings['nag_on'] else 'напоминания выключены'}</b>",
-        f"<i>задача просрочена, если не закрыта за "
-        f"{_plural_days(config.OVERDUE_DAYS)} с постановки. "
-        f"Напоминаю в личку с {settings['morning_time']} до {settings['nag_until']}: "
-        f"срочные — каждые {_human_interval(config.NAG_INTERVALS['срочно'])}, "
-        f"важные — каждые {_human_interval(config.NAG_INTERVALS['важно'])}, "
-        f"обычные — каждые {_human_interval(config.NAG_INTERVALS['обычно'])}</i>",
+        f"<i>срок беру из задачи: «до 18:50», «в течение 15 минут», «завтра к 14:00». "
+        f"Если срок не указан — по приоритету: срочная "
+        f"{_human_interval(int(config.OVERDUE_HOURS['срочно'] * 60))}, важная "
+        f"{_human_interval(int(config.OVERDUE_HOURS['важно'] * 60))}, обычная "
+        f"{_human_interval(int(config.OVERDUE_HOURS['обычно'] * 60))}. "
+        f"Когда срок вышел — пишу исполнителю в личку один раз, дальше повторяю "
+        f"каждые {int(config.NAG_PERCENT)}% от отведённого времени "
+        f"(не чаще {_human_interval(config.NAG_MIN_MINUTES)} и не реже "
+        f"{_human_interval(config.NAG_MAX_MINUTES)}). "
+        f"Тихие часы: пишу только с {settings['morning_time']} до {settings['nag_until']}</i>",
         *extra,
         "",
         f"Часовой пояс: {config.TIMEZONE_NAME}",

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import threading
 from datetime import datetime, timedelta
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import config
+import parsing
 
 _conn: Optional[sqlite3.Connection] = None
 _lock = threading.RLock()
@@ -36,6 +38,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_by   TEXT,
     last_nag_at    TEXT,
     snooze_until   TEXT,
+    deadline_at    TEXT,
     rework_count   INTEGER NOT NULL DEFAULT 0,
     rework_comment TEXT,
     rework_by      TEXT,
@@ -145,6 +148,7 @@ MIGRATIONS = [
     ("drafts", "updated_at", "updated_at TEXT"),
     ("pending_comments", "mode", "mode TEXT NOT NULL DEFAULT 'close'"),
     ("users", "exclude_from_all", "exclude_from_all INTEGER NOT NULL DEFAULT 0"),
+    ("tasks", "deadline_at", "deadline_at TEXT"),
     ("tasks", "rework_count", "rework_count INTEGER NOT NULL DEFAULT 0"),
     ("tasks", "rework_comment", "rework_comment TEXT"),
     ("tasks", "rework_by", "rework_by TEXT"),
@@ -369,15 +373,46 @@ def add_task(chat_id: int, author_id: int, author_name: str, assignee_id: int | 
     # гарантируем строку настроек: по ней сверка планировщика находит чат
     # и включает утренние, вечерние напоминания
     get_settings(chat_id)
+    created = datetime.now(config.TZ)
+    deadline_at = detect_deadline(client_date, description, created)
     cur = _run(
         """INSERT INTO tasks (chat_id, created_at, author_id, author_name, assignee_id,
                               assignee_name, is_all, description, priority, client_date,
-                              needs_comment, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?, 'active')""",
-        (chat_id, now(), author_id, author_name, assignee_id, assignee_name,
-         int(is_all), description, priority, client_date, int(needs_comment)),
+                              needs_comment, deadline_at, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'active')""",
+        (chat_id, created.isoformat(timespec="seconds"), author_id, author_name,
+         assignee_id, assignee_name, int(is_all), description, priority, client_date,
+         int(needs_comment), deadline_at.isoformat(timespec="seconds") if deadline_at else None),
     )
     return int(cur.lastrowid)
+
+
+# в тексте задачи срок ищем только с явным предлогом или единицей времени,
+# иначе «нужно 5 штук» превратилось бы в дедлайн
+_TEXT_DEADLINE_RE = re.compile(
+    r"(?:до|к|ко)\s+\d{1,2}[:.\-]\d{2}"
+    r"|(?:в\s+течени[еи]|через|за)\s+\d+(?:[.,]\d+)?\s*"
+    r"(?:минут\w*|мин|час\w*|ч|дн\w*|день|сутк\w*|недел\w*)"
+    r"|(?:в\s+течени[еи]|через)\s+(?:час|полчаса)",
+    re.IGNORECASE)
+
+
+def detect_deadline(client_date: str | None, description: str,
+                    moment: datetime) -> Optional[datetime]:
+    """Ищет срок сначала в поле «Клиент», затем в тексте задачи."""
+    if client_date:
+        found = parsing.parse_deadline(client_date, moment)
+        if found:
+            return found
+    match = _TEXT_DEADLINE_RE.search(description or "")
+    if match:
+        return parsing.parse_deadline(match.group(0), moment)
+    return None
+
+
+def set_deadline(task_id: int, value: Optional[datetime]) -> None:
+    _run("UPDATE tasks SET deadline_at = ? WHERE id = ?",
+         (value.isoformat(timespec="seconds") if value else None, task_id))
 
 
 def get_task(task_id: int) -> Optional[sqlite3.Row]:
@@ -548,17 +583,53 @@ def stale_tasks(chat_id: int) -> list[sqlite3.Row]:
     )
 
 
-def overdue_tasks(chat_id: int, days: int | None = None) -> list[sqlite3.Row]:
-    """Активные задачи, не закрытые за отведённые сутки."""
-    days = config.OVERDUE_DAYS if days is None else days
-    cutoff = (datetime.now(config.TZ).date() - timedelta(days=days - 1)).isoformat()
-    return _all(
+def deadline(task: sqlite3.Row) -> datetime:
+    """Момент, после которого задача считается просроченной.
+
+    Если при постановке распознали срок («до 18:50», «в течение 15 минут»),
+    берём его. Иначе — запас по приоритету.
+    """
+    try:
+        if task["deadline_at"]:
+            return datetime.fromisoformat(task["deadline_at"])
+    except (IndexError, KeyError):
+        pass
+    hours = config.OVERDUE_HOURS.get(task["priority"],
+                                     config.OVERDUE_HOURS["обычно"])
+    return datetime.fromisoformat(task["created_at"]) + timedelta(hours=hours)
+
+
+def nag_interval(task: sqlite3.Row) -> int:
+    """Через сколько минут напомнить снова — процент от отведённого срока."""
+    created = datetime.fromisoformat(task["created_at"])
+    total = (deadline(task) - created).total_seconds() / 60
+    step = total * config.NAG_PERCENT / 100
+    return int(max(config.NAG_MIN_MINUTES, min(config.NAG_MAX_MINUTES, step)))
+
+
+def overdue_by(task: sqlite3.Row, moment: datetime | None = None) -> timedelta:
+    """Насколько задача просрочена. Ноль или меньше — срок ещё не вышел."""
+    moment = moment or datetime.now(config.TZ)
+    return moment - deadline(task)
+
+
+def overdue_tasks(chat_id: int, moment: datetime | None = None) -> list[sqlite3.Row]:
+    """Активные задачи, у которых вышел срок. Срок зависит от приоритета."""
+    moment = moment or datetime.now(config.TZ)
+    rows = _all(
         """SELECT * FROM tasks WHERE chat_id = ? AND status = 'active'
-             AND substr(created_at, 1, 10) < ?
            ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END,
                     id""",
-        (chat_id, cutoff),
+        (chat_id,),
     )
+    out = []
+    for row in rows:
+        try:
+            if overdue_by(row, moment) > timedelta(0):
+                out.append(row)
+        except ValueError:      # битая дата в старой записи — не роняем рассылку
+            continue
+    return out
 
 
 def mark_nagged(task_id: int) -> None:

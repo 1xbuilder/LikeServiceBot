@@ -138,7 +138,7 @@ async def run_nag(context: ContextTypes.DEFAULT_TYPE, force: bool = False) -> in
             if task["snooze_until"] and not force:
                 if datetime.fromisoformat(task["snooze_until"]) > now:
                     continue
-            interval = config.NAG_INTERVALS.get(task["priority"], 720)
+            interval = db.nag_interval(task)
             if task["last_nag_at"] and not force:
                 due = datetime.fromisoformat(task["last_nag_at"]) + timedelta(minutes=interval)
                 if due > now:
