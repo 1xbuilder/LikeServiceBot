@@ -16,6 +16,14 @@ from parsing import PRIORITY_EMOJI
 Task = sqlite3.Row
 
 
+def field(task: Task, name: str, default=None):
+    """Безопасное чтение колонки: база могла быть создана до её появления."""
+    try:
+        return task[name]
+    except (IndexError, KeyError):
+        return default
+
+
 def emoji(task: Task) -> str:
     return PRIORITY_EMOJI.get(task["priority"], "🟢")
 
@@ -87,7 +95,18 @@ def task_card(task: Task, files_count: int = 0) -> str:
         lines.append(files_line(files_count))
     if task["author_name"]:
         lines.append(f"<i>Поставил: {escape(task['author_name'])}</i>")
+    lines += _rework_lines(task)
     return "\n".join(lines)
+
+
+def _rework_lines(task: Task) -> list[str]:
+    """Замечание автора, из-за которого задача вернулась в работу."""
+    comment = field(task, "rework_comment")
+    if not comment or task["status"] != "active":
+        return []
+    who = field(task, "rework_by") or "автор"
+    return ["", f"🔁 <b>Возвращена на доработку</b> — {escape(who)}",
+            f"💬 {escape(comment)}"]
 
 
 def closed_card(task: Task, files_count: int = 0) -> str:
@@ -104,6 +123,9 @@ def closed_card(task: Task, files_count: int = 0) -> str:
         lines.append(f"💬 {escape(task['comment_text'])}")
     if files_count:
         lines.append(files_line(files_count))
+    count = field(task, "rework_count") or 0
+    if count:
+        lines.append(f"<i>🔁 Была на доработке: {count}</i>")
     return "\n".join(lines)
 
 
@@ -224,6 +246,62 @@ def task_keyboard(task: Task) -> InlineKeyboardMarkup:
     ])
 
 
+def _rework_button(task: Task) -> InlineKeyboardButton:
+    return InlineKeyboardButton("🔁 На доработку",
+                                callback_data=f"rework:{task['id']}")
+
+
+def closed_keyboard(task: Task) -> InlineKeyboardMarkup | None:
+    """У выполненной задачи автор может вернуть её в работу с замечанием."""
+    if task["status"] != "done":
+        return None
+    return InlineKeyboardMarkup([[_rework_button(task)]])
+
+
+def review_request(task: Task) -> str:
+    """Автору задачи: исполнитель отчитался, проверь."""
+    lines = [
+        f"🔎 <b>Проверь выполнение — задача #{task['id']}</b>",
+        escape(task["description"]),
+        "",
+        f"Исполнитель: <b>{escape(assignee_detailed(task))}</b>",
+        f"Закрыл: {escape(task['completed_by'] or '—')}",
+    ]
+    if task["comment_text"]:
+        lines.append(f"💬 {escape(task['comment_text'])}")
+    lines += ["", "<i>Если сделано некорректно — верни на доработку "
+                  "с замечанием, исполнитель получит его в личку.</i>"]
+    return "\n".join(lines)
+
+
+def review_keyboard(task: Task) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👍 Принять", callback_data=f"accept:{task['id']}")],
+        [_rework_button(task)],
+    ])
+
+
+def review_accepted(task: Task) -> str:
+    return (f"👍 <b>Принято — задача #{task['id']}</b>\n"
+            f"<s>{escape(task['description'])}</s>")
+
+
+def rework_notice(task: Task) -> str:
+    """Исполнителю и в группу: задача вернулась в работу."""
+    lines = [
+        f"🔁 <b>Задача #{task['id']} — на доработку</b>",
+        escape(task["description"]),
+        "",
+        f"Ответственный: <b>{escape(assignee_detailed(task))}</b>",
+        f"Вернул: {escape(field(task, 'rework_by') or '—')}",
+        f"💬 {escape(field(task, 'rework_comment') or '—')}",
+    ]
+    if task["needs_comment"]:
+        lines.append("")
+        lines.append("<i>При повторном закрытии снова нужен комментарий.</i>")
+    return "\n".join(lines)
+
+
 def dashboard_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup | None:
     rows = []
     for t in tasks[: config.MAX_DASHBOARD_TASKS]:
@@ -297,6 +375,10 @@ HELP_TEXT = """<b>Бот-задачник</b>
 Закрыть задачу можно оттуда, из личных сообщений или из напоминания.
 
 Если задача помечена 💬, при закрытии бот попросит написать комментарий.
+Автору такой задачи я пришлю отчёт исполнителя на проверку: <b>👍 Принять</b>
+или <b>🔁 На доработку</b> — во втором случае спрошу замечание и верну задачу
+в работу, а исполнитель получит замечание в личку. Кнопка «🔁 На доработку»
+есть и на карточке любой выполненной задачи, нажать её может только автор.
 
 <i>Команды тоже работают, если удобнее печатать: /task, /list, /my, /history,
 /settings. Полный синтаксис: /task @user срочно завтра 12:00 !коммент текст</i>"""
@@ -555,6 +637,13 @@ def task_detail(task: Task, files_count: int = 0) -> str:
     elif task["needs_comment"]:
         lines.append("")
         lines.append("💬 <i>комментарий не заполнен</i>")
+    count = field(task, "rework_count") or 0
+    if count:
+        lines.append("")
+        lines.append(f"🔁 <i>Возвращалась на доработку: {count}</i>")
+        if task["status"] == "active" and field(task, "rework_comment"):
+            lines.append(f"💬 {escape(task['rework_comment'])} "
+                         f"— {escape(field(task, 'rework_by') or '')}")
     return "\n".join(lines)
 
 
@@ -573,6 +662,10 @@ def task_detail_keyboard(task: Task, days: int = 7, only_mine: bool = True,
             "✏️ Переписать комментарий" if task["comment_text"]
             else "✏️ Добавить комментарий",
             callback_data=f"editc:{task['id']}:{days}:{scope}")])
+        if task["status"] == "done":
+            rows.append([InlineKeyboardButton(
+                "🔁 На доработку с замечанием",
+                callback_data=f"rework:{task['id']}:{days}:{scope}")])
         rows.append([InlineKeyboardButton(
             "↩️ Вернуть в работу", callback_data=f"reopen:{task['id']}:{days}:{scope}")])
     rows.append([InlineKeyboardButton(

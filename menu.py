@@ -463,6 +463,20 @@ async def on_task_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await handlers.ask_for_comment(context, query, task, query.from_user, mode="edit")
         return
 
+    elif action == "rework":
+        await handlers.start_rework(context, query, task, query.from_user)
+        return
+
+    elif action == "accept":
+        await query.answer("Принято 👍")
+        try:
+            await query.edit_message_text(ui.review_accepted(task),
+                                          parse_mode=ParseMode.HTML)
+        except TelegramError as exc:
+            if "not modified" not in str(exc).lower():
+                log.info("Не обновил сообщение проверки: %s", exc)
+        return
+
     elif action == "reopen":
         if task["status"] == "active":
             await query.answer("Задача и так в работе")

@@ -136,7 +136,7 @@ async def _update_task_cards(context: ContextTypes.DEFAULT_TYPE, task_id: int) -
     if task["status"] == "active":
         text, markup = ui.task_card(task, files), ui.task_keyboard(task)
     else:
-        text, markup = ui.closed_card(task, files), None
+        text, markup = ui.closed_card(task, files), ui.closed_keyboard(task)
     for row in db.task_messages(task_id):
         try:
             await context.bot.edit_message_text(
@@ -536,13 +536,82 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await _finish(context, query, task_id)
 
 
+def can_rework(task, user_id: int) -> bool:
+    """Вернуть задачу на доработку может только тот, кто её поставил."""
+    return task["author_id"] is None or task["author_id"] == user_id
+
+
+async def start_rework(context: ContextTypes.DEFAULT_TYPE, query, task, user) -> None:
+    """Кнопка «🔁 На доработку» — спрашиваем замечание, задачу вернём после ответа."""
+    if task["status"] != "done":
+        await query.answer("Вернуть на доработку можно только выполненную задачу",
+                           show_alert=True)
+        return
+    if not can_rework(task, user.id):
+        await query.answer(
+            f"На доработку задачу возвращает тот, кто её поставил: "
+            f"{task['author_name'] or '—'}", show_alert=True)
+        return
+    await ask_for_comment(context, query, task, user, mode="rework")
+
+
+async def ask_author_to_review(context: ContextTypes.DEFAULT_TYPE, task,
+                               closed_by_id: int | None) -> None:
+    """Шлёт автору отчёт исполнителя с кнопками «Принять» / «На доработку»."""
+    author_id = task["author_id"]
+    if not author_id or author_id == closed_by_id:
+        return
+    row = db.get_user(author_id)
+    if row is None or not row["private_chat_id"]:
+        return
+    try:
+        await context.bot.send_message(
+            chat_id=row["private_chat_id"], text=ui.review_request(task),
+            parse_mode=ParseMode.HTML, reply_markup=ui.review_keyboard(task))
+    except TelegramError as exc:
+        log.info("Не отправил автору задачу на проверку: %s", exc)
+
+
+async def notify_rework(context: ContextTypes.DEFAULT_TYPE, task) -> None:
+    """Сообщает исполнителю в личку и группе, что задача вернулась в работу."""
+    text = ui.rework_notice(task)
+    if task["is_all"]:
+        recipients = [u for u in db.all_task_members(task["chat_id"])
+                      if u["private_chat_id"]]
+    else:
+        row = db.get_user(task["assignee_id"]) if task["assignee_id"] else None
+        recipients = [row] if row and row["private_chat_id"] else []
+
+    for user in recipients:
+        try:
+            msg = await context.bot.send_message(
+                chat_id=user["private_chat_id"], text=text,
+                parse_mode=ParseMode.HTML, reply_markup=ui.task_keyboard(task))
+            db.add_task_message(task["id"], msg.chat_id, msg.message_id)
+        except TelegramError:
+            pass
+
+    try:
+        await context.bot.send_message(chat_id=task["chat_id"], text=text,
+                                       parse_mode=ParseMode.HTML)
+    except TelegramError as exc:
+        log.warning("Не отправил в группу возврат задачи: %s", exc)
+
+
 async def ask_for_comment(context: ContextTypes.DEFAULT_TYPE, query, task, user,
                           mode: str = "close") -> None:
     """Просит комментарий в личке; если личка недоступна — в текущем чате."""
     row = db.get_user(user.id)
     private_chat = row["private_chat_id"] if row else None
 
-    if mode == "edit":
+    if mode == "rework":
+        body = (f"Задача #{task['id']} — <b>{escape(task['description'])}</b>\n"
+                f"Исполнитель: {escape(task['assignee_name'])}\n"
+                f"Отчёт исполнителя: {escape(task['comment_text'] or '—')}\n\n"
+                "Напиши, что не так, одним сообщением — я верну задачу в работу "
+                "и передам замечание исполнителю.\n"
+                "<i>Можно приложить фото. Отменить: /skip</i>")
+    elif mode == "edit":
         body = (f"Задача #{task['id']} — <b>{escape(task['description'])}</b>\n"
                 f"Текущий комментарий: {escape(task['comment_text'] or '—')}\n\n"
                 "Напиши новый комментарий одним сообщением.\n"
@@ -724,8 +793,12 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
     if task is None:
         await msg.reply_text("Задача не найдена.")
         return
-    if pending["mode"] != "edit" and task["status"] != "active":
+    if pending["mode"] not in ("edit", "rework") and task["status"] != "active":
         await msg.reply_text("Задача уже закрыта.")
+        return
+    if pending["mode"] == "rework" and task["status"] != "done":
+        await msg.reply_text("Задача уже не в статусе «выполнена» — "
+                             "возвращать на доработку нечего.")
         return
 
     comment = (text if text is not None else msg.text).strip()
@@ -745,10 +818,23 @@ async def _accept_comment(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await _restore_menu(context, msg.chat_id)
         return
 
+    if pending["mode"] == "rework":
+        db.rework_task(task["id"], full_name(user), comment)
+        task = db.get_task(task["id"])
+        await _update_task_cards(context, task["id"])
+        await refresh_dashboard(context, task["chat_id"])
+        await notify_rework(context, task)
+        await msg.reply_html(
+            f"🔁 Задача #{task['id']} вернулась в работу.\n💬 {escape(comment)}")
+        if private:
+            await _restore_menu(context, msg.chat_id)
+        return
+
     db.close_task(task["id"], "done", full_name(user), comment=comment)
     await _update_task_cards(context, task["id"])
     await refresh_dashboard(context, task["chat_id"])
     await msg.reply_html(
         f"✅ Задача #{task['id']} закрыта.\n💬 {escape(comment)}")
+    await ask_author_to_review(context, db.get_task(task["id"]), user.id)
     if private:
         await _restore_menu(context, msg.chat_id)

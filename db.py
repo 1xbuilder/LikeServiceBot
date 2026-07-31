@@ -34,7 +34,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     completed_at   TEXT,
     completed_by   TEXT,
     last_nag_at    TEXT,
-    snooze_until   TEXT
+    snooze_until   TEXT,
+    rework_count   INTEGER NOT NULL DEFAULT 0,
+    rework_comment TEXT,
+    rework_by      TEXT,
+    rework_at      TEXT
 );
 
 -- все копии сообщения о задаче (группа + лички), чтобы обновлять их разом
@@ -140,6 +144,10 @@ MIGRATIONS = [
     ("drafts", "updated_at", "updated_at TEXT"),
     ("pending_comments", "mode", "mode TEXT NOT NULL DEFAULT 'close'"),
     ("users", "exclude_from_all", "exclude_from_all INTEGER NOT NULL DEFAULT 0"),
+    ("tasks", "rework_count", "rework_count INTEGER NOT NULL DEFAULT 0"),
+    ("tasks", "rework_comment", "rework_comment TEXT"),
+    ("tasks", "rework_by", "rework_by TEXT"),
+    ("tasks", "rework_at", "rework_at TEXT"),
 ]
 
 
@@ -381,6 +389,22 @@ def reopen_task(task_id: int) -> None:
                             last_nag_at = NULL, snooze_until = NULL
            WHERE id = ?""",
         (task_id,),
+    )
+
+
+def rework_task(task_id: int, by_name: str, comment: str) -> None:
+    """Возвращает выполненную задачу в работу с замечанием от автора.
+
+    Отчёт исполнителя (comment_text) не трогаем — он остаётся в карточке,
+    пока исполнитель не закроет задачу заново с новым комментарием.
+    """
+    _run(
+        """UPDATE tasks SET status = 'active', completed_at = NULL, completed_by = NULL,
+                            last_nag_at = NULL, snooze_until = NULL,
+                            rework_count = COALESCE(rework_count, 0) + 1,
+                            rework_comment = ?, rework_by = ?, rework_at = ?
+           WHERE id = ?""",
+        (comment, by_name, now(), task_id),
     )
 
 
