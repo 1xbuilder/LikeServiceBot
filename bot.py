@@ -53,6 +53,10 @@ def main() -> None:
 
     db.init()
     log.info("База: %s", config.DB_PATH)
+    if not config.DB_IS_PERSISTENT:
+        log.warning("База лежит рядом с кодом. На хостинге в контейнере она "
+                    "сотрётся при следующем деплое — задай DB_PATH или DATA_DIR "
+                    "на постоянный том.")
     if config.DEBUG:
         log.warning("DEBUG=1 — отладочные команды доступны всем участникам группы. "
                     "На проде поставь DEBUG=0 в .env")
@@ -82,6 +86,8 @@ def main() -> None:
     # разные group: иначе первый подходящий обработчик перехватит апдейт целиком
     app.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS, menu.on_bot_added), group=-2)
+    app.add_handler(MessageHandler(
+        filters.StatusUpdate.MIGRATE, handlers.on_chat_migrated), group=-2)
     app.add_handler(ChatMemberHandler(
         menu.on_chat_member, ChatMemberHandler.CHAT_MEMBER), group=-2)
 

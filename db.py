@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 import config
@@ -158,9 +159,34 @@ def _migrate() -> None:
             _run(f"ALTER TABLE {table} ADD COLUMN {ddl}")
 
 
+def _adopt_legacy_db(path: str) -> None:
+    """Первый запуск на постоянном томе — забираем базу из папки с кодом.
+
+    Копируем через sqlite backup, а не файлом: часть данных лежит в WAL.
+    """
+    target = Path(path)
+    legacy = Path(config.BASE_DIR) / "tasks.db"
+    if target.exists() or not legacy.exists() or legacy.resolve() == target.resolve():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        src = sqlite3.connect(str(legacy))
+        dst = sqlite3.connect(str(target))
+        with dst:
+            src.backup(dst)
+        src.close()
+        dst.close()
+        print(f"[db] База перенесена на постоянный том: {legacy} -> {target}")
+    except (sqlite3.Error, OSError) as exc:
+        print(f"[db] Не удалось перенести старую базу: {exc}")
+
+
 def init(path: str | None = None) -> None:
     global _conn
-    _conn = sqlite3.connect(path or config.DB_PATH, check_same_thread=False)
+    path = path or config.DB_PATH
+    if config.DB_ADOPT_LEGACY and path == config.DB_PATH:
+        _adopt_legacy_db(path)
+    _conn = sqlite3.connect(path, check_same_thread=False)
     _conn.row_factory = sqlite3.Row
     _conn.execute("PRAGMA journal_mode=WAL")
     _conn.executescript(SCHEMA)
@@ -406,6 +432,26 @@ def rework_task(task_id: int, by_name: str, comment: str) -> None:
            WHERE id = ?""",
         (comment, by_name, now(), task_id),
     )
+
+
+def migrate_chat(old_id: int, new_id: int) -> None:
+    """Группа стала супергруппой — Telegram выдал ей новый chat_id.
+
+    Без переноса все задачи, участники и настройки остались бы привязаны
+    к исчезнувшему id: списки опустели бы, а закреп перестал обновляться.
+    """
+    for table in ("tasks", "task_messages", "chat_members", "drafts",
+                  "pending_comments", "draft_files"):
+        _run(f"UPDATE OR IGNORE {table} SET chat_id = ? WHERE chat_id = ?",
+             (new_id, old_id))
+        _run(f"DELETE FROM {table} WHERE chat_id = ?", (old_id,))
+
+    # id сообщений при миграции не сохраняются — закреп придётся создать заново
+    if _one("SELECT 1 FROM chat_settings WHERE chat_id = ?", (new_id,)) is None:
+        _run("""UPDATE chat_settings SET chat_id = ?, dashboard_message_id = NULL
+                WHERE chat_id = ?""", (new_id, old_id))
+    else:
+        _run("DELETE FROM chat_settings WHERE chat_id = ?", (old_id,))
 
 
 def set_exclude_from_all(user_id: int, value: bool) -> None:

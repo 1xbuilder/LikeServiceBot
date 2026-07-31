@@ -24,7 +24,41 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-DB_PATH = os.getenv("DB_PATH", str(BASE_DIR / "tasks.db"))
+
+
+def _default_db_path() -> str:
+    """Каталог, переживающий перезапуск контейнера, если хостинг его даёт.
+
+    На хостингах ботов рядом с кодом писать нельзя: при деплое папка
+    пересобирается из репозитория и база пропадает. Постоянный том обычно
+    отдают через DATA_DIR или просто монтируют /app/data.
+    """
+    candidates = []
+    if os.getenv("DATA_DIR"):
+        candidates.append(Path(os.getenv("DATA_DIR")))
+    # хостинг-контейнер: код лежит в /app, постоянный том смонтирован в /app/data
+    if BASE_DIR == Path("/app") or Path("/app") in BASE_DIR.parents:
+        candidates.append(Path("/app/data"))
+
+    for folder in candidates:
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            probe = folder / ".write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+        except OSError:
+            continue
+        return str(folder / "tasks.db")
+
+    # обычный компьютер или сервер: база рядом с кодом
+    return str(BASE_DIR / "tasks.db")
+
+
+DB_PATH = os.getenv("DB_PATH") or _default_db_path()
+DB_IS_PERSISTENT = Path(DB_PATH).parent != BASE_DIR
+# базу из папки с кодом забираем только когда путь выбрали сами:
+# если DB_PATH задан руками, человек знает, куда положил базу
+DB_ADOPT_LEGACY = not os.getenv("DB_PATH") and DB_IS_PERSISTENT
 
 # Часовой пояс, в котором считается время утреннего/вечернего напоминания.
 TIMEZONE_NAME = os.getenv("TIMEZONE", "Europe/Moscow")

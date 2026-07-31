@@ -175,6 +175,21 @@ async def _notify_privately(context: ContextTypes.DEFAULT_TYPE,
 
 # ==================================================================== команды
 
+async def on_chat_migrated(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обычная группа стала супергруппой: переносим всё на новый chat_id."""
+    msg = update.effective_message
+    old_id = getattr(msg, "migrate_from_chat_id", None)
+    if not old_id:
+        return          # это сообщение-двойник в старом чате, оно не нужно
+    new_id = msg.chat_id
+    db.migrate_chat(old_id, new_id)
+    log.warning("Группа %s стала супергруппой %s — задачи перенесены",
+                old_id, new_id)
+    from jobs import schedule_chat_jobs
+    schedule_chat_jobs(context.application, new_id)
+    await refresh_dashboard(context, new_id)
+
+
 async def track_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Запоминает всех, кто пишет в группу, — иначе @username не с чем сопоставить."""
     msg = update.effective_message
