@@ -257,6 +257,7 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif parsed.assignee_token is None and reply_user:
         assignee_id, assignee_name = reply_user.id, full_name(reply_user)
         db.upsert_user(reply_user.id, reply_user.username, assignee_name)
+        db.add_member(chat.id, assignee_id)
     else:
         # текстовое упоминание (у человека нет @username)
         mention = None
@@ -267,6 +268,7 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if mention:
             assignee_id, assignee_name = mention.id, full_name(mention)
             db.upsert_user(mention.id, mention.username, assignee_name)
+            db.add_member(chat.id, assignee_id)
         else:
             token = parsed.assignee_token or ""
             row = db.find_user_by_username(token) or db.find_user_by_name(token.lstrip("@"))
@@ -279,6 +281,7 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 return
             assignee_id, assignee_name = row["user_id"], row["full_name"]
+            db.add_member(chat.id, assignee_id)
 
     task_id = db.add_task(
         chat_id=chat.id, author_id=author.id, author_name=full_name(author),
@@ -304,10 +307,12 @@ async def cmd_task(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat = update.effective_chat
+    user = update.effective_user
     if chat.type == "private":
-        await cmd_my(update, context)
-        return
-    tasks = db.active_tasks(chat.id)
+        db.upsert_user(user.id, user.username, full_name(user), chat.id)
+        tasks = db.active_tasks_for_user_chats(user.id)
+    else:
+        tasks = db.active_tasks(chat.id)
     await update.effective_message.reply_html(
         ui.task_list_text("📋 Активные задачи", tasks),
         reply_markup=ui.dashboard_keyboard(tasks),

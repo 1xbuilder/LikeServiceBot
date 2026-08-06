@@ -513,8 +513,39 @@ def member_names(chat_id: int) -> list[str]:
 
 
 def user_chats(user_id: int) -> list[int]:
-    return [r["chat_id"] for r in
-            _all("SELECT chat_id FROM chat_members WHERE user_id = ?", (user_id,))]
+    """Чаты человека.
+
+    Основной источник — chat_members, но туда попадают только те, кто писал
+    в группу (или был админом на момент синхронизации). Человека могли
+    назначить исполнителем, не имея его в списке участников, — тогда в личке
+    было бы пусто. Поэтому дополняем чатами, где он автор или исполнитель.
+    """
+    rows = _all(
+        """SELECT chat_id FROM chat_members WHERE user_id = ?
+           UNION
+           SELECT chat_id FROM tasks WHERE assignee_id = ? OR author_id = ?""",
+        (user_id, user_id, user_id),
+    )
+    return [r["chat_id"] for r in rows]
+
+
+def active_tasks_for_user_chats(user_id: int) -> list[sqlite3.Row]:
+    """Все активные задачи всех чатов человека — без фильтра по исполнителю.
+
+    Это и есть «общие задачи» для личного кабинета: то же, что видно
+    по кнопке «📋 Задачи» в группе.
+    """
+    chats = user_chats(user_id)
+    if not chats:
+        return []
+    marks = ",".join("?" * len(chats))
+    return _all(
+        f"""SELECT * FROM tasks
+            WHERE status = 'active' AND chat_id IN ({marks})
+            ORDER BY CASE priority WHEN 'срочно' THEN 0 WHEN 'важно' THEN 1 ELSE 2 END,
+                     id""",
+        (*chats,),
+    )
 
 
 def history_for_user(user_id: int, days: int, only_mine: bool = True) -> list[sqlite3.Row]:

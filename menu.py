@@ -532,7 +532,7 @@ async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     elif text == ui.BTN_LIST:
         tasks = db.active_tasks(chat.id) if in_group else \
-            db.active_tasks_for_user_all_chats(user.id)
+            db.active_tasks_for_user_chats(user.id)
         await send(ui.task_list_text("📋 Активные задачи", tasks),
                    ui.dashboard_keyboard(tasks))
 
